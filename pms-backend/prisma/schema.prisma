@@ -33,6 +33,12 @@ model User {
   createdAt    DateTime @default(now())
   modifiedAt   DateTime @updatedAt
 
+  @@index([name])
+  @@index([email])
+  @@index([code])
+  @@index([role])
+  @@index([phone])
+
   memberships ProjectMember[]
 }
 

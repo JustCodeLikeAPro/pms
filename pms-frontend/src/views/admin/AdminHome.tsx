@@ -1,19 +1,34 @@
 import { Link } from 'react-router-dom';
 
 export default function AdminHome(){
+  const tiles = [
+    // 📋 Lists
+    { to: '/admin/projects', title: 'Projects', desc: 'Browse & search all projects in the system.' },
+    { to: '/admin/users',    title: 'Users',    desc: 'Browse & search all users, including roles.' },
+
+    // ➕ Create
+    { to: '/admin/projects/new', title: 'Create New Project', desc: 'Add a project with code, city, status, stage & health.' },
+    { to: '/admin/users/new',    title: 'Create New User',    desc: 'Add a pre-registered user with role, email & phone.' },
+
+    // 🔎 Roles
+    { to: '/admin/roles',  title: 'View Roles',   desc: 'See roles catalog and overview.' },
+    { to: '/admin/assign', title: 'Assign Roles', desc: 'Pick a project and assign users per role (supports None).' },
+  ];
+
   return (
-    <div className="min-h-screen p-6 space-y-6">
-      <h1 className="text-2xl font-semibold">Admin Console</h1>
-      <p className="text-sm text-gray-600">Create projects and assign roles to users.</p>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Link to="/admin/projects/new" className="p-6 rounded-xl border bg-white hover:shadow">
-          <div className="text-lg font-semibold">Create New Project</div>
-          <div className="text-sm text-gray-600">Add a project with code, name, city, stage, status, health.</div>
-        </Link>
-        <Link to="/admin/roles" className="p-6 rounded-xl border bg-white hover:shadow">
-          <div className="text-lg font-semibold">Assign Roles</div>
-          <div className="text-sm text-gray-600">Assign project-specific roles to users and manage memberships.</div>
-        </Link>
+    <div className="min-h-screen p-6 bg-gray-50">
+      <div className="max-w-6xl mx-auto">
+        <h1 className="text-2xl font-semibold mb-2">Admin Console</h1>
+        <p className="text-gray-600 mb-6">Manage projects, users, and role assignments.</p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {tiles.map(t => (
+            <Link key={t.to} to={t.to} className="rounded-xl border bg-white p-4 hover:shadow">
+              <div className="text-lg font-medium">{t.title}</div>
+              <div className="text-sm text-gray-600 mt-1">{t.desc}</div>
+            </Link>
+          ))}
+        </div>
       </div>
     </div>
   );

@@ -11,5 +11,14 @@ export const endpoints = {
   me: '/me',
   myKpis: '/me/kpis',
   myProjects: '/my/projects',
+  // admin (suggested backend paths)
+  admin: {
+    projects: '/admin/projects',                     // POST (create), GET (list)
+    users: '/admin/users',                           // POST (create), GET (list)
+    rolesCatalog: '/admin/roles/catalog',            // GET: return list of allowed roles
+    rolesOverview: '/admin/roles/overview',          // GET: counts by role, etc. (optional)
+    projectRoles: (projectId: string) => `/admin/projects/${projectId}/roles`,     // GET current assignments
+    assignRoles: (projectId: string) => `/admin/projects/${projectId}/assign-roles` // POST bulk assign
+  },
   projectModules: (id: string) => `/projects/${id}/modules`,
 };
