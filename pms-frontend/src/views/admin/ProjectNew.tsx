@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api/client';
 import { endpoints } from '../../api/endpoints';
+import ConfirmModal from '../../components/ConfirmModal';
 
 const STATUS = ['Ongoing','Completed'] as const;
 const STAGE  = ['Construction','Fitout','Design'] as const;
@@ -16,7 +17,6 @@ export default function AdminProjectNew(){
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string|null>(null);
 
-  // ✅ confirmation modal state
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const set = (k: keyof typeof form, v: string) => setForm(s => ({...s, [k]: v}));
@@ -28,7 +28,6 @@ export default function AdminProjectNew(){
       setBusy(true);
       const { data } = await api.post(endpoints.admin.projects, form);
       if(data?.ok || data?.projectId){
-        // ✅ open confirmation dialog instead of instant redirect
         setConfirmOpen(true);
       }else{
         setErr(data?.error || 'Failed to create project');
@@ -79,26 +78,13 @@ export default function AdminProjectNew(){
         </button>
       </div>
 
-      {/* ✅ Confirmation dialog */}
-      {confirmOpen && (
-        <div className="fixed inset-0 z-40">
-          <div className="absolute inset-0 bg-black/40" />
-          <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow">
-              <h3 className="text-lg font-semibold">Project created</h3>
-              <p className="text-sm text-gray-600 mt-2">Your project was created successfully.</p>
-              <div className="mt-4 flex justify-end">
-                <button
-                  className="px-4 py-2 rounded bg-emerald-600 text-white"
-                  onClick={() => { setConfirmOpen(false); nav('/admin', { replace: true }); }}
-                >
-                  OK
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmModal
+        open={confirmOpen}
+        title="Project created"
+        description="Your project was created successfully."
+        onConfirm={() => nav('/admin', { replace: true })}
+        onOpenChange={setConfirmOpen}
+      />
     </div>
   );
 }

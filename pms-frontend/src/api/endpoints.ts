@@ -18,7 +18,8 @@ export const endpoints = {
     rolesCatalog: '/admin/roles/catalog',            // GET: return list of allowed roles
     rolesOverview: '/admin/roles/overview',          // GET: counts by role, etc. (optional)
     projectRoles: (projectId: string) => `/admin/projects/${projectId}/roles`,     // GET current assignments
-    assignRoles: (projectId: string) => `/admin/projects/${projectId}/assign-roles` // POST bulk assign
+    assignRoles: (projectId: string) => `/admin/projects/${projectId}/assign-roles`, // POST bulk assign
+    usersNextCode: '/admin/users/next-code',
   },
   projectModules: (id: string) => `/projects/${id}/modules`,
 };

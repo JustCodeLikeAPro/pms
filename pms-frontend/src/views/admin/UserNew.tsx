@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api/client';
 import { endpoints } from '../../api/endpoints';
+import ConfirmModal from '../../components/ConfirmModal';
 
 const ROLES = [
   'Admin','Customer','PMC','Architect','Designer','Contractor',
@@ -12,32 +13,51 @@ const ROLES = [
 export default function AdminUserNew(){
   const nav = useNavigate();
   const [form, setForm] = useState({
-    code: '', role: ROLES[0], name: '', city: '',
-    email: '', phone: '', isSuperAdmin: false
+    code: '',                 // will be auto-filled
+    role: ROLES[0],
+    name: '',
+    city: '',
+    email: '',
+    phone: '',
+    isSuperAdmin: false
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string|null>(null);
-
-  // ✅ confirmation modal
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const set = (k: keyof typeof form, v: any) => setForm(s => ({...s, [k]: v}));
 
+  // Fetch next code whenever role changes (and on first render)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get(endpoints.admin.usersNextCode, { params: { role: form.role } });
+        if (!cancelled && data?.ok && data.code) setForm(s => ({ ...s, code: data.code }));
+      } catch {
+        // If endpoint not ready, keep blank; backend will still generate on submit
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [form.role]);
+
   const submit = async () => {
     setErr(null);
-    if(!form.code || !form.name || (!form.email && !form.phone)) {
-      setErr('Code, Name and either Email or Phone are required'); return;
+    if(!form.name || (!form.email && !form.phone)) {
+      setErr('Name and either Email or Phone are required'); return;
     }
     try{
       setBusy(true);
+      // Send code too (even though backend can generate again; keeps UI in sync)
       const { data } = await api.post(endpoints.admin.users, form);
       if(data?.ok || data?.userId){
-        setConfirmOpen(true); // ✅ open confirmation dialog
+        setConfirmOpen(true);
       }else{
         setErr(data?.error || 'Failed to create user');
       }
-    }catch(e:any){ setErr(e?.response?.data?.error || 'Failed to create user'); }
-    finally{ setBusy(false); }
+    }catch(e:any){
+      setErr(e?.response?.data?.error || 'Failed to create user');
+    }finally{ setBusy(false); }
   };
 
   const input = 'border rounded w-full p-3';
@@ -52,17 +72,23 @@ export default function AdminUserNew(){
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div><label className="text-sm">User Code</label><input className={input} value={form.code} onChange={e=>set('code', e.target.value.toUpperCase())}/></div>
           <div>
             <label className="text-sm">Role</label>
             <select className={select} value={form.role} onChange={e=>set('role', e.target.value)}>
               {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
             </select>
           </div>
-          <div><label className="text-sm">Name</label><input className={input} value={form.name} onChange={e=>set('name', e.target.value)}/></div>
-          <div><label className="text-sm">City</label><input className={input} value={form.city} onChange={e=>set('city', e.target.value)}/></div>
-          <div><label className="text-sm">Email</label><input className={input} value={form.email} onChange={e=>set('email', e.target.value)}/></div>
-          <div><label className="text-sm">Phone</label><input className={input} value={form.phone} onChange={e=>set('phone', e.target.value)}/></div>
+
+          <div>
+            <label className="text-sm">Auto Code</label>
+            <input className={input} value={form.code} readOnly title="Auto-generated from role" />
+          </div>
+
+          <div><label className="text-sm">Name</label><input className={input} value={form.name} onChange={e=>set('name', e.target.value)} /></div>
+          <div><label className="text-sm">City</label><input className={input} value={form.city} onChange={e=>set('city', e.target.value)} /></div>
+          <div><label className="text-sm">Email</label><input className={input} value={form.email} onChange={e=>set('email', e.target.value)} /></div>
+          <div><label className="text-sm">Phone</label><input className={input} value={form.phone} onChange={e=>set('phone', e.target.value)} /></div>
+
           <div className="sm:col-span-2">
             <label className="inline-flex items-center gap-2 text-sm">
               <input type="checkbox" checked={form.isSuperAdmin} onChange={e=>set('isSuperAdmin', e.target.checked)} />
@@ -78,26 +104,13 @@ export default function AdminUserNew(){
         </button>
       </div>
 
-      {/* ✅ Confirmation dialog */}
-      {confirmOpen && (
-        <div className="fixed inset-0 z-40">
-          <div className="absolute inset-0 bg-black/40" />
-          <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow">
-              <h3 className="text-lg font-semibold">User created</h3>
-              <p className="text-sm text-gray-600 mt-2">Your user was created successfully.</p>
-              <div className="mt-4 flex justify-end">
-                <button
-                  className="px-4 py-2 rounded bg-emerald-600 text-white"
-                  onClick={() => { setConfirmOpen(false); nav('/admin', { replace: true }); }}
-                >
-                  OK
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmModal
+        open={confirmOpen}
+        title="User created"
+        description={`User ${form.name} (${form.code}) was created successfully.`}
+        onConfirm={() => nav('/admin', { replace: true })}
+        onOpenChange={setConfirmOpen}
+      />
     </div>
   );
 }

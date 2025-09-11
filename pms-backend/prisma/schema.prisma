@@ -23,7 +23,7 @@ enum InspectionStatus {
 
 model User {
   userId       String   @id @default(uuid())
-  code         String?  @unique
+  code         String  @unique
   role         String
   name         String?
   city         String?

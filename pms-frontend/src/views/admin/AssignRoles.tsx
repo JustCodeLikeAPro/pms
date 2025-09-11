@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../../api/client';
 import { endpoints } from '../../api/endpoints';
+import ConfirmModal from '../../components/ConfirmModal';
 
 type Project = { projectId: string; code: string; name: string; city: string };
 type User = { userId: string; name: string; role: string; email?: string; phone?: string };
@@ -12,6 +14,7 @@ const ROLES = [
 ];
 
 export default function AdminAssignRoles(){
+  const nav = useNavigate();
   const [step, setStep] = useState<'pick'|'assign'>('pick');
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
@@ -23,7 +26,6 @@ export default function AdminAssignRoles(){
   const [current, setCurrent] = useState<Record<string, string | null>>({});
   const [saving, setSaving] = useState(false);
 
-  // ✅ confirmation modal
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   useEffect(() => {
@@ -46,7 +48,7 @@ export default function AdminAssignRoles(){
     setStep('assign');
     try{
       const [usersRes, rolesRes] = await Promise.all([
-        api.get(endpoints.admin.users),                   // q optional now
+        api.get(endpoints.admin.users), // q optional
         api.get(endpoints.admin.projectRoles(p.projectId))
       ]);
       const users: User[] = Array.isArray(usersRes?.data)
@@ -80,7 +82,6 @@ export default function AdminAssignRoles(){
     try{
       const { data } = await api.post(endpoints.admin.assignRoles(selectedProject.projectId), { assignments: current });
       if(data?.ok){
-        // ✅ open confirmation dialog after successful save
         setConfirmOpen(true);
       } else {
         setErr(data?.error || 'Failed to save assignments');
@@ -177,28 +178,13 @@ export default function AdminAssignRoles(){
         </div>
       </div>
 
-      {/* ✅ Confirmation dialog */}
-      {confirmOpen && (
-        <div className="fixed inset-0 z-40">
-          <div className="absolute inset-0 bg-black/40" />
-          <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow">
-              <h3 className="text-lg font-semibold">Assignments saved</h3>
-              <p className="text-sm text-gray-600 mt-2">
-                Role assignments for this project were saved successfully.
-              </p>
-              <div className="mt-4 flex justify-end">
-                <button
-                  className="px-4 py-2 rounded bg-emerald-600 text-white"
-                  onClick={() => { setConfirmOpen(false); window.location.assign('/admin'); }}
-                >
-                  OK
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmModal
+        open={confirmOpen}
+        title="Assignments saved"
+        description="Role assignments for this project were saved successfully."
+        onConfirm={() => nav('/admin', { replace: true })}
+        onOpenChange={setConfirmOpen}
+      />
     </div>
   );
 }
