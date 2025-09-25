@@ -1,6 +1,12 @@
 
 seed1.ts
 seed2.ts
+postgreSQL_Comm.txt
+Git_Reset.txt
+Postgres_Permission.txt
+vite.config2.ts
+Users1.tsx
+Users2.tsx
 # ---- OS / Editor junk ----
 .DS_Store
 Thumbs.db

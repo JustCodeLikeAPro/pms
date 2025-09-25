@@ -81,13 +81,16 @@ export default function AdminHome() {
                 Modules
               </div>
               <div className="flex flex-col gap-1">
-                <SideLink to="/adminHome" label="Dashboard" end />
-                <SideLink to="/adminHome/users" label="Users" />
-                <SideLink to="/adminHome/projects" label="Projects" />
-                <SideLink to="/adminHome/companies" label="Companies" />
-                <SideLink to="/adminHome/assignments" label="Assignments" />
-                <SideLink to="/adminHome/permissions" label="Permissions" />
-                <SideLink to="/adminHome/permission-explorer" label="Permission Explorer" />
+                <SideLink to="." label="Dashboard" end />
+                <SideLink to="users" label="Users" />
+                <SideLink to="projects" label="Projects" />
+                <SideLink to="companies" label="Companies" />
+                <SideLink to="assignments" label="Assignments" />
+                <SideLink to="permissions" label="Role Templates and Project Overrides" />
+                <SideLink to="permission-explorer" label="User Permission Explorer" />
+                <SideLink to="activityLib" label="Activity Library" />
+                <SideLink to="materialLib" label="Material Library" />
+                <SideLink to="checkListLib" label="Checklist Library" />
               </div>
             </div>
           </aside>

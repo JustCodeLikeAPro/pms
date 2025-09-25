@@ -1,13 +1,18 @@
 // src/App.tsx
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Login from './views/Login';
-import AdminHome from './views/admin/adminHome';
-import Users from './views/admin/Users';
+import AdminHome from './views/admin/AdminHome';
+import Users from './views/admin/users/Users';
+import UserCreate from "./views/admin/users/UserCreate";
+import UserEdit from "./views/admin/users/UserEdit";
 import Projects from './views/admin/Projects';
 import Companies from './views/admin/Companies';
 import Assignments from './views/admin/Assignments';
 import Permissions from './views/admin/Permissions';
 import PermissionExplorer from './views/admin/PermissionExplorer';
+import ActivityLib from './views/admin/ActivityLib';
+import MaterialLib from './views/admin/MaterialLib';
+import ChecklistLib from './views/admin/ChecklistLib';
 
 // Role homes (create these files or swap with your actual components)
 import ClientHome from './views/client/clientHome';
@@ -36,15 +41,26 @@ export default function App() {
         <Route path="/login" element={<Login />} />
 
         {/* Admin area */}
-        <Route path="/adminHome" element={<RequireAuth><AdminHome /></RequireAuth>}>
+        <Route
+          path="/admin"
+          element={<RequireAuth><AdminHome /></RequireAuth>}
+        >
+          <Route index element={<div className="p-4">Dashboard</div>} />
           <Route path="users" element={<Users />} />
+          <Route path="users/:id" element={<Users />} />
+          <Route path="users/new" element={<UserCreate />} />
+
+          <Route path="users/:id/edit" element={<UserEdit />} />
+
           <Route path="projects" element={<Projects />} />
           <Route path="companies" element={<Companies />} />
           <Route path="assignments" element={<Assignments />} />
           <Route path="permissions" element={<Permissions />} />
           <Route path="permission-explorer" element={<PermissionExplorer />} />
+          <Route path='activityLib' element={<ActivityLib />} />
+          <Route path="materialLib" element={<MaterialLib />} />
+          <Route path="checkListLib" element={<ChecklistLib />} />
           {/* when no child path picked */}
-          <Route index element={<div className="p-4">Dashboard</div>} />
         </Route>
 
         {/* Role-based homes */}
