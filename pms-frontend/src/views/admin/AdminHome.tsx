@@ -88,9 +88,9 @@ export default function AdminHome() {
                 <SideLink to="assignments" label="Assignments" />
                 <SideLink to="permissions" label="Role Templates and Project Overrides" />
                 <SideLink to="permission-explorer" label="User Permission Explorer" />
-                <SideLink to="activityLib" label="Activity Library" />
-                <SideLink to="materialLib" label="Material Library" />
-                <SideLink to="checkListLib" label="Checklist Library" />
+                <SideLink to="ref/activitylib" label="Activity Library" />
+                <SideLink to="ref/materiallib" label="Material Library" />
+                <SideLink to="ref/checklistlib" label="Checklist Library" />
               </div>
             </div>
           </aside>
