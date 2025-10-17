@@ -102,6 +102,15 @@ function computeValidityLabel(validFrom?: string, validTo?: string): string {
   if (to && today > to) return "Expired";
   return "Valid";
 }
+function consultantCompanyId(u: UserLite): string | null {
+  const mems = Array.isArray(u.userRoleMemberships) ? u.userRoleMemberships : [];
+  const m = mems.find(
+    (m) =>
+      String(m?.role || "").toLowerCase() === "consultant" &&
+      m?.company?.companyId
+  );
+  return (m?.company?.companyId as string) || null;
+}
 
 const TileHeader = ({ title, subtitle }: { title: string; subtitle?: string }) => (
   <div className="mb-3">
@@ -110,7 +119,7 @@ const TileHeader = ({ title, subtitle }: { title: string; subtitle?: string }) =
   </div>
 );
 
-export default function ConsultantAssignments() {
+export default function ConsultantsAssignments() {
   const nav = useNavigate();
 
   // --- Auth gate ---
@@ -145,7 +154,8 @@ export default function ConsultantAssignments() {
           .filter((p: ProjectLite) => p.projectId && p.title);
         if (!alive) return;
         setProjects(minimal);
-        if (minimal.length > 0 && !selectedProjectId) setSelectedProjectId(minimal[0].projectId);
+        // Stop auto-setting first project
+        //if (minimal.length > 0 && !selectedProjectId) setSelectedProjectId(minimal[0].projectId);
       } catch (e: any) {
         if (!alive) return;
         setErr(e?.response?.data?.error || e?.message || "Failed to load projects.");
@@ -154,7 +164,8 @@ export default function ConsultantAssignments() {
     return () => { alive = false; };
   }, [selectedProjectId]);
 
-  // Tile 3 (browse role users) — using /admin/users for now
+  // Tile 3 (browse role users) — using /admin/users
+  // If BE exposes specific tables, swap to role-specific endpoints later.
   const [allUsers, setAllUsers] = useState<UserLite[]>([]);
   const [usersLoading, setUsersLoading] = useState(false);
   const [usersErr, setUsersErr] = useState<string | null>(null);
@@ -178,6 +189,7 @@ export default function ConsultantAssignments() {
     for (const u of allUsers) {
       const mems = Array.isArray(u.userRoleMemberships) ? u.userRoleMemberships : [];
       for (const m of mems) {
+        // Only include companies where the membership role is consultants
         if (String(m?.role || "").toLowerCase() !== "consultant") continue;
         const name = (m?.company?.name || "").trim();
         if (name) set.add(name);
@@ -207,6 +219,7 @@ export default function ConsultantAssignments() {
       setCompanyFilter("");
     }
   }, [companyOptions, companyFilter]);
+
 
   useEffect(() => {
     let alive = true;
@@ -300,12 +313,14 @@ export default function ConsultantAssignments() {
         const mems = Array.isArray(u.userRoleMemberships) ? u.userRoleMemberships : [];
         const companyNames = new Set(
           mems
-            .filter(m => String(m?.role || "").toLowerCase() === "consultant")
+            .filter(m => String(m?.role || "").toLowerCase() === "consultant") // enforce role
             .map(m => (m?.company?.name || "").trim())
             .filter(Boolean) as string[]
         );
         if (!companyNames.has(companyFilter.trim())) return false;
       }
+
+
       return true;
     });
 
@@ -315,7 +330,7 @@ export default function ConsultantAssignments() {
         const hay = [
           u.code || "",
           displayName(u),
-          companiesLabel(u),
+          companiesLabel(u),       // <-- included in search
           projectsLabel(u),
           phoneDisplay(u),
           u.email || "",
@@ -333,7 +348,7 @@ export default function ConsultantAssignments() {
       action: "",
       code: u.code || "",
       name: displayName(u),
-      company: companiesLabel(u),
+      company: companiesLabel(u), // <-- value for new column
       projects: projectsLabel(u),
       mobile: phoneDisplay(u),
       email: u.email || "",
@@ -364,7 +379,8 @@ export default function ConsultantAssignments() {
     });
 
     return rows;
-  }, [allUsers, statusFilter, stateFilter, districtFilter, q, sortKey, sortDir, movedIds, companyFilter]);
+  }, [allUsers, statusFilter, stateFilter, districtFilter, q,
+    sortKey, sortDir, movedIds, companyFilter]);
 
   const total = rowsAll.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -394,7 +410,7 @@ export default function ConsultantAssignments() {
     if (dupes.length > 0) {
       const lines = dupes.map(u => {
         const name = displayName(u) || "(No name)";
-        return `${name} is already assigned to ${projectTitle}. If you wish to make changes, edit the Consultant Assignments.`;
+        return `${name} has already assigned ${projectTitle}. If you wish to make changes, edit the consultant Assignments.`;
       });
       alert(lines.join("\n"));
       return;
@@ -414,7 +430,7 @@ export default function ConsultantAssignments() {
       role: "Consultant",
       scopeType: "Project",
       projectId: selectedProjectId,
-      companyId: null,
+      companyId: consultantCompanyId(u),
       validFrom,
       validTo,
       isDefault: false,
@@ -434,7 +450,7 @@ export default function ConsultantAssignments() {
       try {
         const { data: fresh } = await api.get("/admin/users", { params: { includeMemberships: "1" } });
         setAllUsers(Array.isArray(fresh) ? fresh : (fresh?.users ?? []));
-      } catch {}
+      } catch { }
 
       const el = document.querySelector('[data-tile-name="Browse Consultants"]');
       el?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -452,7 +468,7 @@ export default function ConsultantAssignments() {
     if (alreadyAssignedToSelectedProject(user, selectedProjectId)) {
       const projectTitle = projects.find(p => p.projectId === selectedProjectId)?.title || "(Selected Project)";
       const name = displayName(user) || "(No name)";
-      alert(`${name} is already assigned to ${projectTitle}. If you wish to make changes, edit the Consultant Assignments.`);
+      alert(`${name} has already assigned ${projectTitle}. If you wish to make changes, edit the Consultant Assignments.`);
       return;
     }
     setPicked((prev) => (prev.some((u) => u.userId === user.userId) ? prev : [user, ...prev]));
@@ -519,8 +535,8 @@ export default function ConsultantAssignments() {
           userName: displayName(u) || "(No name)",
           projectId: pj.projectId,
           projectTitle: pj.title,
-          company: companiesLabel(u),
-          projects: projectsLabel(u),
+          company: m?.company?.name || "",     // <- per membership
+          projects: pj.title,                  // <- single project for this membership
           status: u.userStatus || "",
           validFrom: vf,
           validTo: vt,
@@ -530,6 +546,7 @@ export default function ConsultantAssignments() {
           _user: u,
           _mem: m,
         });
+
       }
     }
     return rows;
@@ -566,14 +583,115 @@ export default function ConsultantAssignments() {
   const [editRow, setEditRow] = useState<AssignmentRow | null>(null);
   const [editFrom, setEditFrom] = useState<string>("");
   const [editTo, setEditTo] = useState<string>("");
+  const [origFrom, setOrigFrom] = useState<string>("");
+  const [origTo, setOrigTo] = useState<string>("");
+  const [pendingEditAlert, setPendingEditAlert] = useState<string | null>(null);
+const [deleting, setDeleting] = useState(false);
+
+const onHardDeleteFromEdit = async () => {
+  if (!editRow?.membershipId) {
+    alert("Cannot remove: missing membership id.");
+    return;
+  }
+
+  const confirm = window.confirm(
+    [
+      "This will permanently remove this Consultant assignment from the project.",
+      "",
+      `Consultant: ${editRow.userName}`,
+      `Project:    ${editRow.projectTitle}`,
+      "",
+      "Are you sure you want to proceed?",
+    ].join("\n")
+  );
+  if (!confirm) return;
+
+  try {
+    setDeleting(true);
+
+    // Call BE to remove the membership/assignment
+    await api.delete(`/admin/assignments/${editRow.membershipId}`);
+
+    // Build success message and refresh the table data
+    const successMsg = [
+      "Removed Consultant assignment",
+      "",
+      `Project:    ${editRow.projectTitle}`,
+      `Consultant: ${editRow.userName}`,
+    ].join("\n");
+
+    // Refresh users so Tile 4 reflects the deletion
+    const { data: fresh } = await api.get("/admin/users", {
+      params: { includeMemberships: "1" },
+    });
+    setAllUsers(Array.isArray(fresh) ? fresh : (fresh?.users ?? []));
+
+    // Close the modal first; show alert after unmount (you already have the pending alert pattern)
+    setEditOpen(false);
+    setEditRow(null);
+    setPendingEditAlert(successMsg);
+  } catch (e: any) {
+    const msg =
+      e?.response?.data?.message ||
+      e?.response?.data?.error ||
+      e?.message ||
+      "Failed to remove assignment.";
+    alert(msg);
+  } finally {
+    setDeleting(false);
+  }
+};
 
   const openView = (row: AssignmentRow) => { setViewRow(row); setViewOpen(true); };
   const openEdit = (row: AssignmentRow) => {
+    setDeleting(false); // ensure clean state on open
     setEditRow(row);
-    setEditFrom(fmtLocalDateOnly(row.validFrom) || todayLocalISO());
-    setEditTo(fmtLocalDateOnly(row.validTo) || addDaysISO(todayLocalISO(), 1));
+
+    const currentFrom = fmtLocalDateOnly(row.validFrom) || "";
+    const currentTo = fmtLocalDateOnly(row.validTo) || "";
+
+    // keep existing behavior for initial values
+    setEditFrom(currentFrom || todayLocalISO());
+    setEditTo(currentTo || addDaysISO(todayLocalISO(), 1));
+
+    // remember the original valid-from (used for validation/min attribute)
+    setOrigFrom(currentFrom);
+    setOrigTo(currentTo);
+
     setEditOpen(true);
   };
+
+  useEffect(() => {
+    if (!editOpen && pendingEditAlert) {
+      const msg = pendingEditAlert;
+      setPendingEditAlert(null); // prevent re-firing
+
+      // Wait for the next paint (twice to be extra sure), THEN alert.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          alert(msg);
+        });
+      });
+    }
+  }, [editOpen, pendingEditAlert]);
+
+  useEffect(() => {
+  if (!editOpen) return;
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      if (deleting) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      setEditOpen(false);
+    }
+  };
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
+}, [editOpen, deleting]);
+
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -587,9 +705,10 @@ export default function ConsultantAssignments() {
 
       {/* Tile 1 — Projects */}
       <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4 mb-4" aria-label="Tile: Projects" data-tile-name="Projects">
-        <TileHeader title="Tile 1 — Projects" subtitle="Choose the project to assign." />
+        <TileHeader title="Projects" subtitle="Choose the project to assign." />
         <div className="max-w-xl">
           <label className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1 block">Project</label>
+          {/* Always show a blank default option in the select */}
           <select
             className="w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
             value={selectedProjectId}
@@ -599,15 +718,21 @@ export default function ConsultantAssignments() {
             {projects.length === 0 ? (
               <option value="">Loading…</option>
             ) : (
-              projects.map((p) => <option key={p.projectId} value={p.projectId}>{p.title}</option>)
+              <>
+                <option value="">—</option>
+                {projects.map((p) => (
+                  <option key={p.projectId} value={p.projectId}>{p.title}</option>
+                ))}
+              </>
             )}
           </select>
+
         </div>
       </section>
 
       {/* Tile 2 — Roles & Options (Consultant) */}
       <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4 mb-4" aria-label="Tile: Roles & Options" data-tile-name="Roles & Options">
-        <TileHeader title="Tile 2 — Roles & Options" subtitle="Pick from moved consultants & set validity." />
+        <TileHeader title="Roles & Options" subtitle="Pick from moved consultants & set validity." />
 
         <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* moved list */}
@@ -719,7 +844,7 @@ export default function ConsultantAssignments() {
 
       {/* Tile 3 — Browse Consultants */}
       <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4 mb-4" aria-label="Tile: Browse Consultants" data-tile-name="Browse Consultants">
-        <TileHeader title="Tile 3 — Browse Consultants" subtitle="Search and filter; sort columns; paginate. Use ‘Move’ to add consultants to Tile 2." />
+        <TileHeader title="Browse Consultants" subtitle="Search and filter; sort columns; paginate. Use ‘Move’ to add consultants to Tile 2." />
 
         {/* Controls */}
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:gap-3 mb-3">
@@ -801,7 +926,7 @@ export default function ConsultantAssignments() {
                 >
                   <option value="code">Code</option>
                   <option value="name">Name</option>
-                  <option value="company">Company</option>
+                  <option value="company">Company</option>{/* <-- NEW option */}
                   <option value="projects">Projects</option>
                   <option value="mobile">Mobile</option>
                   <option value="email">Email</option>
@@ -825,6 +950,7 @@ export default function ConsultantAssignments() {
                 >
                   Clear
                 </button>
+
               </div>
             </div>
 
@@ -862,7 +988,7 @@ export default function ConsultantAssignments() {
                       { key: "code", label: "Code" },
                       { key: "name", label: "Name" },
                       { key: "company", label: "Company" },
-                      { key: "projects", label: "Projects" },
+                      { key: "projects", label: "Project" },
                       { key: "mobile", label: "Mobile" },
                       { key: "email", label: "Email" },
                       { key: "state", label: "State" },
@@ -899,7 +1025,7 @@ export default function ConsultantAssignments() {
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap">
                         <button
                           className="px-2 py-1 rounded border text-xs hover:bg-gray-50 dark:hover:bg-neutral-800"
-                          title="Move this consultant to selection"
+                          title="Move this consultants to selection"
                           onClick={() => onMoveToTile2(r._raw!)}
                         >
                           Move
@@ -907,7 +1033,7 @@ export default function ConsultantAssignments() {
                       </td>
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap" title={r.code}>{r.code}</td>
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap" title={r.name}>{r.name}</td>
-                      <td className="px-3 py-2 border-b dark:border-neutral-800" title={r.company}><div className="truncate max-w-[260px]">{r.company}</div></td>
+                      <td className="px-3 py-2 border-b dark:border-neutral-800" title={r.company}><div className="truncate max-w-[260px]">{r.company}</div></td>{/* NEW cell */}
                       <td className="px-3 py-2 border-b dark:border-neutral-800" title={r.projects}><div className="truncate max-w-[360px]">{r.projects}</div></td>
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap" title={r.mobile}>{r.mobile}</td>
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap" title={r.email}>{r.email}</td>
@@ -932,6 +1058,7 @@ export default function ConsultantAssignments() {
               {districtFilter ? <> · District: <b>{districtFilter}</b></> : null}
               {statusFilter !== "all" ? <> · Status: <b>{statusFilter}</b></> : null}
               {companyFilter ? <> · Company: <b>{companyFilter}</b></> : null}
+
             </div>
             <div className="flex items-center gap-1">
               <button className="px-3 py-1 rounded border dark:border-neutral-800 disabled:opacity-50"
@@ -947,14 +1074,14 @@ export default function ConsultantAssignments() {
         </div>
       </section>
 
-      {/* Tile 4 — Consultant Assignments */}
-      <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4" aria-label="Tile: Consultant Assignments" data-tile-name="Consultant Assignments">
-        <TileHeader title="Tile 4 — Consultant Assignments" subtitle="All consultants who have been assigned to projects." />
+      {/* Tile 4 — consultants Assignments */}
+      <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4" aria-label="Tile: consultants Assignments" data-tile-name="Consultant Assignments">
+        <TileHeader title="Consultants Assignments" subtitle="All consultants who have been assigned to projects." />
 
         <div className="border rounded-xl dark:border-neutral-800 overflow-hidden">
           <div className="overflow-auto" style={{ maxHeight: "55vh" }}>
             {assignedSortedRows.length === 0 ? (
-              <div className="p-4 text-sm text-gray-600 dark:text-gray-300">No consultant assignments found.</div>
+              <div className="p-4 text-sm text-gray-600 dark:text-gray-300">No consultants assignments found.</div>
             ) : (
               <table className="min-w-full text-sm">
                 <thead className="bg-gray-50 dark:bg-neutral-800 sticky top-0 z-10">
@@ -1021,6 +1148,7 @@ export default function ConsultantAssignments() {
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap">{fmtLocalDateOnly(r.validFrom) || "—"}</td>
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap">{fmtLocalDateOnly(r.validTo) || "—"}</td>
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap">{fmtLocalDateTime(r.updated) || "—"}</td>
+
                     </tr>
                   ))}
                 </tbody>
@@ -1035,7 +1163,7 @@ export default function ConsultantAssignments() {
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/50" onClick={() => setViewOpen(false)} />
           <div className="relative bg-white dark:bg-neutral-900 rounded-2xl shadow-lg border dark:border-neutral-800 w-full max-w-md p-4">
-            <div className="text-lg font-semibold mb-2 dark:text-white">Consultant Assignment</div>
+            <div className="text-lg font-semibold mb-2 dark:text-white">Consultants Assignment</div>
             <div className="text-xs text-gray-600 dark:text-gray-300 mb-3">
               {viewRow.userName} · {viewRow.projectTitle}
             </div>
@@ -1043,7 +1171,7 @@ export default function ConsultantAssignments() {
               <table className="min-w-full text-sm">
                 <tbody>
                   <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
-                    <td className="px-3 py-2 font-medium whitespace-nowrap">Consultant</td>
+                    <td className="px-3 py-2 font-medium whitespace-nowrap">Consultants</td>
                     <td className="px-3 py-2">{viewRow.userName || "—"}</td>
                   </tr>
                   <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
@@ -1083,90 +1211,149 @@ export default function ConsultantAssignments() {
       )}
 
       {/* ===== Edit Modal ===== */}
-      {editOpen && editRow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setEditOpen(false)} />
-          <div className="relative bg-white dark:bg-neutral-900 rounded-2xl shadow-lg border dark:border-neutral-800 w-full max-w-md p-4">
-            <div className="text-lg font-semibold mb-2 dark:text-white">Edit Validity</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300 mb-3">
-              {editRow.userName} · {editRow.projectTitle}
-            </div>
-            <div className="mb-4 overflow-hidden rounded-lg border dark:border-neutral-800">
-              <table className="min-w-full text-sm">
-                <tbody>
-                  <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
-                    <td className="px-3 py-2 font-medium whitespace-nowrap">Consultant</td>
-                    <td className="px-3 py-2">{editRow.userName || "—"}</td>
-                  </tr>
-                  <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
-                    <td className="px-3 py-2 font-medium whitespace-nowrap">Project</td>
-                    <td className="px-3 py-2">{editRow.projectTitle || "—"}</td>
-                  </tr>
-                  <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
-                    <td className="px-3 py-2 font-medium whitespace-nowrap">Status</td>
-                    <td className="px-3 py-2">{editRow.status || "—"}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">Valid From</div>
-                <input
-                  type="date"
-                  className="mt-1 w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
-                  value={editFrom}
-                  min={todayLocalISO()}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setEditFrom(v);
-                    if (editTo && editTo < v) setEditTo(v);
-                  }}
-                />
-              </div>
-              <div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">Valid To</div>
-                <input
-                  type="date"
-                  className="mt-1 w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
-                  value={editTo}
-                  min={editFrom || todayLocalISO()}
-                  onChange={(e) => setEditTo(e.target.value)}
-                />
-              </div>
-            </div>
+{editOpen && editRow && (
+  <div className="fixed inset-0 z-50 flex items-center justify-center">
+    {/* Backdrop — don’t allow closing while deleting */}
+    <div
+      className="absolute inset-0 bg-black/50"
+      onClick={() => { if (!deleting) setEditOpen(false); }}
+    />
 
-            <div className="mt-4 flex justify-end gap-2">
-              <button className="px-4 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800" onClick={() => setEditOpen(false)}>
-                Cancel
-              </button>
-              <button
-                className="px-4 py-2 rounded text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50"
-                onClick={async () => {
-                  const today = todayLocalISO();
-                  if (!editFrom || !editTo) { alert("Both Valid From and Valid To are required."); return; }
-                  if (editFrom < today) { alert("Valid From cannot be before today."); return; }
-                  if (editTo < editFrom) { alert("Valid To must be on or after Valid From."); return; }
-                  if (!editRow?.membershipId) { alert("Cannot update: missing membership id."); return; }
-                  try {
-                    await api.patch(`/admin/assignments/${editRow.membershipId}`, { validFrom: editFrom, validTo: editTo });
-                    const { data: fresh } = await api.get("/admin/users", { params: { includeMemberships: "1" } });
-                    setAllUsers(Array.isArray(fresh) ? fresh : (fresh?.users ?? []));
-                    setEditOpen(false);
-                  } catch (e: any) {
-                    const msg = e?.response?.data?.message || e?.response?.data?.error || e?.message || "Update failed.";
-                    alert(msg);
-                  }
-                }}
-                title="Update validity dates"
-                disabled={!editRow?.membershipId}
-              >
-                Update
-              </button>
-            </div>
-          </div>
-        </div>
+    <div className="relative bg-white dark:bg-neutral-900 rounded-2xl shadow-lg border dark:border-neutral-800 w-full max-w-md p-4">
+      {/* Block UI while deleting */}
+      {deleting && (
+        <div className="absolute inset-0 rounded-2xl bg-white/40 dark:bg-black/30 backdrop-blur-[1px] cursor-wait" />
       )}
+
+      {/* Header with Remove button */}
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="text-lg font-semibold dark:text-white">Edit Validity</div>
+        <button
+  className="px-3 py-1.5 rounded text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+  onClick={onHardDeleteFromEdit}
+  disabled={deleting || !editRow?.membershipId}
+  title={editRow?.membershipId ? "Permanently remove this assignment" : "Missing membership id"}
+>
+  {deleting ? "Removing…" : "Remove"}
+</button>
+
+      </div>
+
+      <div className="text-xs text-gray-600 dark:text-gray-300 mb-3">
+        {editRow.userName} · {editRow.projectTitle}
+      </div>
+
+      <div className="mb-4 overflow-hidden rounded-lg border dark:border-neutral-800">
+        <table className="min-w-full text-sm">
+          <tbody>
+            <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
+              <td className="px-3 py-2 font-medium whitespace-nowrap">Consultants</td>
+              <td className="px-3 py-2">{editRow.userName || "—"}</td>
+            </tr>
+            <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
+              <td className="px-3 py-2 font-medium whitespace-nowrap">Project</td>
+              <td className="px-3 py-2">{editRow.projectTitle || "—"}</td>
+            </tr>
+            <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
+              <td className="px-3 py-2 font-medium whitespace-nowrap">Status</td>
+              <td className="px-3 py-2">{editRow.status || "—"}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <div className="text-xs text-gray-600 dark:text-gray-300">Valid From</div>
+          <input
+            type="date"
+            className="mt-1 w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+            value={editFrom}
+            min={todayLocalISO()}
+            onChange={(e) => {
+              const v = e.target.value;
+              setEditFrom(v);
+              if (editTo && editTo < v) setEditTo(v); // keep To >= From
+            }}
+            disabled={deleting}
+          />
+        </div>
+        <div>
+          <div className="text-xs text-gray-600 dark:text-gray-300">Valid To</div>
+          <input
+            type="date"
+            className="mt-1 w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+            value={editTo}
+            min={(editFrom && editFrom > todayLocalISO()) ? editFrom : todayLocalISO()}
+            onChange={(e) => setEditTo(e.target.value)}
+            disabled={deleting}
+          />
+        </div>
+      </div>
+
+      <div className="mt-4 flex justify-end gap-2">
+        <button
+          className="px-4 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800 disabled:opacity-50"
+          onClick={() => setEditOpen(false)}
+          disabled={deleting}
+        >
+          Cancel
+        </button>
+        <button
+          className="px-4 py-2 rounded text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50"
+          onClick={async () => {
+            const today = todayLocalISO();
+            if (!editFrom || !editTo) { alert("Both Valid From and Valid To are required."); return; }
+            if (editTo < today) { alert("Valid To cannot be before today."); return; }
+            if (editTo < editFrom) { alert("Valid To must be on or after Valid From."); return; }
+            if (!editRow?.membershipId) { alert("Cannot update: missing membership id."); return; }
+            try {
+              const companyId =
+                editRow?._mem?.company?.companyId ||
+                (editRow?._user ? consultantCompanyId(editRow._user) : null);
+
+              const payload: any = {
+                validTo: editTo,
+                scopeType: "Project",
+                projectId: editRow.projectId,
+                ...(companyId ? { companyId } : {}),
+              };
+              if (!origFrom || editFrom !== origFrom) {
+                payload.validFrom = editFrom;
+              }
+
+              await api.patch(`/admin/assignments/${editRow.membershipId}`, payload);
+
+              const successMsg = [
+                `Updated validity`,
+                ``,
+                `Project: ${editRow.projectTitle}`,
+                `Consultant: ${editRow.userName}`,
+                ``,
+                `Valid From: ${origFrom || "—"} → ${editFrom}`,
+                `Valid To:   ${origTo || "—"} → ${editTo}`,
+              ].join("\n");
+
+              const { data: fresh } = await api.get("/admin/users", { params: { includeMemberships: "1" } });
+              setAllUsers(Array.isArray(fresh) ? fresh : (fresh?.users ?? []));
+
+              setEditOpen(false);
+              setEditRow(null);
+              setPendingEditAlert(successMsg);
+            } catch (e: any) {
+              const msg = e?.response?.data?.message || e?.response?.data?.error || e?.message || "Update failed.";
+              alert(msg);
+            }
+          }}
+          title="Update validity dates"
+          disabled={!editRow?.membershipId || deleting}
+        >
+          Update
+        </button>
+      </div>
+    </div>
+  </div>
+)}
     </div>
   );
 }

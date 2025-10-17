@@ -102,6 +102,15 @@ function computeValidityLabel(validFrom?: string, validTo?: string): string {
   if (to && today > to) return "Expired";
   return "Valid";
 }
+function contractorCompanyId(u: UserLite): string | null {
+  const mems = Array.isArray(u.userRoleMemberships) ? u.userRoleMemberships : [];
+  const m = mems.find(
+    (m) =>
+      String(m?.role || "").toLowerCase() === "contractor" &&
+      m?.company?.companyId
+  );
+  return (m?.company?.companyId as string) || null;
+}
 
 const TileHeader = ({ title, subtitle }: { title: string; subtitle?: string }) => (
   <div className="mb-3">
@@ -145,7 +154,8 @@ export default function ContractorsAssignments() {
           .filter((p: ProjectLite) => p.projectId && p.title);
         if (!alive) return;
         setProjects(minimal);
-        if (minimal.length > 0 && !selectedProjectId) setSelectedProjectId(minimal[0].projectId);
+        // Stop auto-setting first project
+       // if (minimal.length > 0 && !selectedProjectId) setSelectedProjectId(minimal[0].projectId);
       } catch (e: any) {
         if (!alive) return;
         setErr(e?.response?.data?.error || e?.message || "Failed to load projects.");
@@ -154,8 +164,8 @@ export default function ContractorsAssignments() {
     return () => { alive = false; };
   }, [selectedProjectId]);
 
-  // Tile 3 (browse role users) — using /admin/users for now
-  // If your BE exposes specific tables, swap to role-specific endpoints later.
+  // Tile 3 (browse role users) — using /admin/users
+  // If BE exposes specific tables, swap to role-specific endpoints later.
   const [allUsers, setAllUsers] = useState<UserLite[]>([]);
   const [usersLoading, setUsersLoading] = useState(false);
   const [usersErr, setUsersErr] = useState<string | null>(null);
@@ -179,7 +189,7 @@ export default function ContractorsAssignments() {
     for (const u of allUsers) {
       const mems = Array.isArray(u.userRoleMemberships) ? u.userRoleMemberships : [];
       for (const m of mems) {
-        // Only include companies where the membership role is Contractor
+        // Only include companies where the membership role is contractors
         if (String(m?.role || "").toLowerCase() !== "contractor") continue;
         const name = (m?.company?.name || "").trim();
         if (name) set.add(name);
@@ -268,7 +278,7 @@ export default function ContractorsAssignments() {
     action: string;
     code: string;
     name: string;
-    company: string;   // <-- NEW column
+    company: string;
     projects: string;
     mobile: string;
     email: string;
@@ -400,7 +410,7 @@ export default function ContractorsAssignments() {
     if (dupes.length > 0) {
       const lines = dupes.map(u => {
         const name = displayName(u) || "(No name)";
-        return `${name} has already assigned ${projectTitle}. If you wish to make changes, edit the Contractor Assignments.`;
+        return `${name} has already assigned ${projectTitle}. If you wish to make changes, edit the contractor Assignments.`;
       });
       alert(lines.join("\n"));
       return;
@@ -420,7 +430,7 @@ export default function ContractorsAssignments() {
       role: "Contractor",
       scopeType: "Project",
       projectId: selectedProjectId,
-      companyId: null,
+      companyId: contractorCompanyId(u),
       validFrom,
       validTo,
       isDefault: false,
@@ -525,8 +535,8 @@ export default function ContractorsAssignments() {
           userName: displayName(u) || "(No name)",
           projectId: pj.projectId,
           projectTitle: pj.title,
-          company: companiesLabel(u),      // <-- ADD
-          projects: projectsLabel(u),      // <-- ADD
+          company: m?.company?.name || "",     // <- per membership
+          projects: pj.title,                  // <- single project for this membership
           status: u.userStatus || "",
           validFrom: vf,
           validTo: vt,
@@ -536,6 +546,7 @@ export default function ContractorsAssignments() {
           _user: u,
           _mem: m,
         });
+
       }
     }
     return rows;
@@ -572,14 +583,113 @@ export default function ContractorsAssignments() {
   const [editRow, setEditRow] = useState<AssignmentRow | null>(null);
   const [editFrom, setEditFrom] = useState<string>("");
   const [editTo, setEditTo] = useState<string>("");
+  const [origFrom, setOrigFrom] = useState<string>("");
+  const [origTo, setOrigTo] = useState<string>("");
+  const [pendingEditAlert, setPendingEditAlert] = useState<string | null>(null);
+const [deleting, setDeleting] = useState(false);
+
+// --- helpers used by delete ---
+const refetchUsers = async (): Promise<UserLite[]> => {
+  const { data } = await api.get("/admin/users", { params: { includeMemberships: "1" } });
+  const list = Array.isArray(data) ? data : (data?.users ?? []);
+  setAllUsers(list);
+  return list as UserLite[];
+};
+const normalizeId = (v: any) => String(v ?? "").trim();
+
+/** Find the freshest membership id for (userId, projectId) with role Contractor */
+const findCurrentMembershipId = async (userId: string, projectId: string) => {
+  const match = (u: UserLite | undefined) => {
+    if (!u?.userRoleMemberships) return null;
+    const pid = normalizeId(projectId);
+    const m = u.userRoleMemberships.find((mem: any) => {
+      const role = String(mem?.role || "").toLowerCase();
+      const memPid = normalizeId(mem?.project?.projectId);
+      return (role === "contractor" || role === "") && memPid === pid;
+    });
+    return (m?.id ?? (m as any)?._id ?? (m as any)?.membershipId ?? null) as string | null;
+  };
+
+  let id = match(allUsers.find(u => u.userId === userId));
+  if (id) return id;
+
+  const users = await refetchUsers();
+  id = match(users.find(u => u.userId === userId));
+  return id ?? null;
+};
+
+const onHardDeleteFromEdit = async () => {
+  if (!editRow) return;
+
+  const resolvedId =
+    editRow.membershipId || (await findCurrentMembershipId(editRow.userId, editRow.projectId));
+
+  if (!resolvedId) {
+    await refetchUsers();
+    setEditOpen(false);
+    alert("Assignment already removed.");
+    return;
+  }
+
+  const msg =
+    `Remove assignment?\n\n` +
+    `Contractor: ${editRow.userName}\n` +
+    `Project: ${editRow.projectTitle}\n\n` +
+    `This will permanently delete the assignment.`;
+
+  if (!window.confirm(msg)) return;
+
+  try {
+    setDeleting(true);
+    await api.delete(`/admin/assignments/${encodeURIComponent(resolvedId)}`);
+    await refetchUsers();
+    alert(`Unassigned ${editRow.userName} from ${editRow.projectTitle}.`);
+    setEditOpen(false);
+  } catch (e: any) {
+    const status = e?.response?.status;
+    if (status === 404) {
+      await refetchUsers();
+      setEditOpen(false);
+      alert("Assignment already removed.");
+    } else {
+      alert(e?.response?.data?.error || e?.message || "Unassign failed.");
+    }
+  } finally {
+    setDeleting(false);
+  }
+};
 
   const openView = (row: AssignmentRow) => { setViewRow(row); setViewOpen(true); };
   const openEdit = (row: AssignmentRow) => {
     setEditRow(row);
-    setEditFrom(fmtLocalDateOnly(row.validFrom) || todayLocalISO());
-    setEditTo(fmtLocalDateOnly(row.validTo) || addDaysISO(todayLocalISO(), 1));
+
+    const currentFrom = fmtLocalDateOnly(row.validFrom) || "";
+    const currentTo = fmtLocalDateOnly(row.validTo) || "";
+
+    // keep existing behavior for initial values
+    setEditFrom(currentFrom || todayLocalISO());
+    setEditTo(currentTo || addDaysISO(todayLocalISO(), 1));
+
+    // remember the original valid-from (used for validation/min attribute)
+    setOrigFrom(currentFrom);
+    setOrigTo(currentTo);
+
     setEditOpen(true);
   };
+
+  useEffect(() => {
+    if (!editOpen && pendingEditAlert) {
+      const msg = pendingEditAlert;
+      setPendingEditAlert(null); // prevent re-firing
+
+      // Wait for the next paint (twice to be extra sure), THEN alert.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          alert(msg);
+        });
+      });
+    }
+  }, [editOpen, pendingEditAlert]);
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -593,27 +703,34 @@ export default function ContractorsAssignments() {
 
       {/* Tile 1 — Projects */}
       <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4 mb-4" aria-label="Tile: Projects" data-tile-name="Projects">
-        <TileHeader title="Tile 1 — Projects" subtitle="Choose the project to assign." />
+        <TileHeader title="Projects" subtitle="Choose the project to assign." />
         <div className="max-w-xl">
           <label className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1 block">Project</label>
-          <select
-            className="w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
-            value={selectedProjectId}
-            onChange={(e) => { setSelectedProjectId(e.target.value); setPage(1); }}
-            title="Select project"
-          >
-            {projects.length === 0 ? (
-              <option value="">Loading…</option>
-            ) : (
-              projects.map((p) => <option key={p.projectId} value={p.projectId}>{p.title}</option>)
-            )}
-          </select>
+        {/* Always show a blank default option in the select */}
+<select
+  className="w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+  value={selectedProjectId}
+  onChange={(e) => { setSelectedProjectId(e.target.value); setPage(1); }}
+  title="Select project"
+>
+  {projects.length === 0 ? (
+    <option value="">Loading…</option>
+  ) : (
+    <>
+      <option value="">—</option>
+      {projects.map((p) => (
+        <option key={p.projectId} value={p.projectId}>{p.title}</option>
+      ))}
+    </>
+  )}
+</select>
+
         </div>
       </section>
 
       {/* Tile 2 — Roles & Options (Contractor) */}
       <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4 mb-4" aria-label="Tile: Roles & Options" data-tile-name="Roles & Options">
-        <TileHeader title="Tile 2 — Roles & Options" subtitle="Pick from moved contractors & set validity." />
+        <TileHeader title="Roles & Options" subtitle="Pick from moved contractors & set validity." />
 
         <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* moved list */}
@@ -725,7 +842,7 @@ export default function ContractorsAssignments() {
 
       {/* Tile 3 — Browse Contractors */}
       <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4 mb-4" aria-label="Tile: Browse Contractors" data-tile-name="Browse Contractors">
-        <TileHeader title="Tile 3 — Browse Contractors" subtitle="Search and filter; sort columns; paginate. Use ‘Move’ to add contractors to Tile 2." />
+        <TileHeader title="Browse Contractors" subtitle="Search and filter; sort columns; paginate. Use ‘Move’ to add contractors to Tile 2." />
 
         {/* Controls */}
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:gap-3 mb-3">
@@ -868,8 +985,8 @@ export default function ContractorsAssignments() {
                       { key: "action", label: "Action" },
                       { key: "code", label: "Code" },
                       { key: "name", label: "Name" },
-                      { key: "company", label: "Company" }, // <-- NEW header
-                      { key: "projects", label: "Projects" },
+                      { key: "company", label: "Company" },
+                      { key: "projects", label: "Project" },
                       { key: "mobile", label: "Mobile" },
                       { key: "email", label: "Email" },
                       { key: "state", label: "State" },
@@ -906,7 +1023,7 @@ export default function ContractorsAssignments() {
                       <td className="px-3 py-2 border-b dark:border-neutral-800 whitespace-nowrap">
                         <button
                           className="px-2 py-1 rounded border text-xs hover:bg-gray-50 dark:hover:bg-neutral-800"
-                          title="Move this contractor to selection"
+                          title="Move this contractors to selection"
                           onClick={() => onMoveToTile2(r._raw!)}
                         >
                           Move
@@ -955,14 +1072,14 @@ export default function ContractorsAssignments() {
         </div>
       </section>
 
-      {/* Tile 4 — Contractor Assignments */}
-      <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4" aria-label="Tile: Contractor Assignments" data-tile-name="Contractor Assignments">
-        <TileHeader title="Tile 4 — Contractor Assignments" subtitle="All contractors who have been assigned to projects." />
+      {/* Tile 4 — contractors Assignments */}
+      <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4" aria-label="Tile: contractors Assignments" data-tile-name="Contractor Assignments">
+        <TileHeader title="Contractors Assignments" subtitle="All contractors who have been assigned to projects." />
 
         <div className="border rounded-xl dark:border-neutral-800 overflow-hidden">
           <div className="overflow-auto" style={{ maxHeight: "55vh" }}>
             {assignedSortedRows.length === 0 ? (
-              <div className="p-4 text-sm text-gray-600 dark:text-gray-300">No contractor assignments found.</div>
+              <div className="p-4 text-sm text-gray-600 dark:text-gray-300">No contractors assignments found.</div>
             ) : (
               <table className="min-w-full text-sm">
                 <thead className="bg-gray-50 dark:bg-neutral-800 sticky top-0 z-10">
@@ -1044,7 +1161,7 @@ export default function ContractorsAssignments() {
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/50" onClick={() => setViewOpen(false)} />
           <div className="relative bg-white dark:bg-neutral-900 rounded-2xl shadow-lg border dark:border-neutral-800 w-full max-w-md p-4">
-            <div className="text-lg font-semibold mb-2 dark:text-white">Contractor Assignment</div>
+            <div className="text-lg font-semibold mb-2 dark:text-white">Contractors Assignment</div>
             <div className="text-xs text-gray-600 dark:text-gray-300 mb-3">
               {viewRow.userName} · {viewRow.projectTitle}
             </div>
@@ -1052,7 +1169,7 @@ export default function ContractorsAssignments() {
               <table className="min-w-full text-sm">
                 <tbody>
                   <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
-                    <td className="px-3 py-2 font-medium whitespace-nowrap">Contractor</td>
+                    <td className="px-3 py-2 font-medium whitespace-nowrap">Contractors</td>
                     <td className="px-3 py-2">{viewRow.userName || "—"}</td>
                   </tr>
                   <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
@@ -1092,90 +1209,150 @@ export default function ContractorsAssignments() {
       )}
 
       {/* ===== Edit Modal ===== */}
-      {editOpen && editRow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setEditOpen(false)} />
-          <div className="relative bg-white dark:bg-neutral-900 rounded-2xl shadow-lg border dark:border-neutral-800 w-full max-w-md p-4">
-            <div className="text-lg font-semibold mb-2 dark:text-white">Edit Validity</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300 mb-3">
-              {editRow.userName} · {editRow.projectTitle}
-            </div>
-            <div className="mb-4 overflow-hidden rounded-lg border dark:border-neutral-800">
-              <table className="min-w-full text-sm">
-                <tbody>
-                  <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
-                    <td className="px-3 py-2 font-medium whitespace-nowrap">Contractor</td>
-                    <td className="px-3 py-2">{editRow.userName || "—"}</td>
-                  </tr>
-                  <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
-                    <td className="px-3 py-2 font-medium whitespace-nowrap">Project</td>
-                    <td className="px-3 py-2">{editRow.projectTitle || "—"}</td>
-                  </tr>
-                  <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
-                    <td className="px-3 py-2 font-medium whitespace-nowrap">Status</td>
-                    <td className="px-3 py-2">{editRow.status || "—"}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">Valid From</div>
-                <input
-                  type="date"
-                  className="mt-1 w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
-                  value={editFrom}
-                  min={todayLocalISO()}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setEditFrom(v);
-                    if (editTo && editTo < v) setEditTo(v);
-                  }}
-                />
-              </div>
-              <div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">Valid To</div>
-                <input
-                  type="date"
-                  className="mt-1 w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
-                  value={editTo}
-                  min={editFrom || todayLocalISO()}
-                  onChange={(e) => setEditTo(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="mt-4 flex justify-end gap-2">
-              <button className="px-4 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800" onClick={() => setEditOpen(false)}>
-                Cancel
-              </button>
-              <button
-                className="px-4 py-2 rounded text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50"
-                onClick={async () => {
-                  const today = todayLocalISO();
-                  if (!editFrom || !editTo) { alert("Both Valid From and Valid To are required."); return; }
-                  if (editFrom < today) { alert("Valid From cannot be before today."); return; }
-                  if (editTo < editFrom) { alert("Valid To must be on or after Valid From."); return; }
-                  if (!editRow?.membershipId) { alert("Cannot update: missing membership id."); return; }
-                  try {
-                    await api.patch(`/admin/assignments/${editRow.membershipId}`, { validFrom: editFrom, validTo: editTo });
-                    const { data: fresh } = await api.get("/admin/users", { params: { includeMemberships: "1" } });
-                    setAllUsers(Array.isArray(fresh) ? fresh : (fresh?.users ?? []));
-                    setEditOpen(false);
-                  } catch (e: any) {
-                    const msg = e?.response?.data?.message || e?.response?.data?.error || e?.message || "Update failed.";
-                    alert(msg);
-                  }
-                }}
-                title="Update validity dates"
-                disabled={!editRow?.membershipId}
-              >
-                Update
-              </button>
-            </div>
-          </div>
-        </div>
+{editOpen && editRow && (
+  <div className="fixed inset-0 z-50 flex items-center justify-center">
+    {/* Backdrop: don't allow closing while deleting */}
+    <div
+      className="absolute inset-0 bg-black/50"
+      onClick={() => { if (!deleting) setEditOpen(false); }}
+    />
+    {/* Card */}
+    <div className="relative bg-white dark:bg-neutral-900 rounded-2xl shadow-lg border dark:border-neutral-800 w-full max-w-md p-4">
+      {/* Block UI while deleting */}
+      {deleting && (
+        <div className="absolute inset-0 rounded-2xl bg-white/40 dark:bg-black/30 backdrop-blur-[1px] cursor-wait" />
       )}
+
+      {/* Header with Remove button */}
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="text-lg font-semibold dark:text-white">Edit Validity</div>
+        <button
+          className="px-3 py-1.5 rounded text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+          onClick={onHardDeleteFromEdit}
+          disabled={deleting}
+          title="Permanently remove this assignment"
+        >
+          {deleting ? "Removing…" : "Remove"}
+        </button>
+      </div>
+
+      <div className="text-xs text-gray-600 dark:text-gray-300 mb-3">
+        {editRow.userName} · {editRow.projectTitle}
+      </div>
+
+      <div className="mb-4 overflow-hidden rounded-lg border dark:border-neutral-800">
+        <table className="min-w-full text-sm">
+          <tbody>
+            <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
+              <td className="px-3 py-2 font-medium whitespace-nowrap">Contractors</td>
+              <td className="px-3 py-2">{editRow.userName || "—"}</td>
+            </tr>
+            <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
+              <td className="px-3 py-2 font-medium whitespace-nowrap">Project</td>
+              <td className="px-3 py-2">{editRow.projectTitle || "—"}</td>
+            </tr>
+            <tr className="odd:bg-gray-50/60 dark:odd:bg-neutral-900/60">
+              <td className="px-3 py-2 font-medium whitespace-nowrap">Status</td>
+              <td className="px-3 py-2">{editRow.status || "—"}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <div className="text-xs text-gray-600 dark:text-gray-300">Valid From</div>
+          <input
+            type="date"
+            className="mt-1 w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+            value={editFrom}
+            min={todayLocalISO()}
+            onChange={(e) => {
+              const v = e.target.value;
+              setEditFrom(v);
+              if (editTo && editTo < v) setEditTo(v); // keep: ensure To >= From
+            }}
+            disabled={deleting}
+          />
+        </div>
+        <div>
+          <div className="text-xs text-gray-600 dark:text-gray-300">Valid To</div>
+          <input
+            type="date"
+            className="mt-1 w-full border rounded px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+            value={editTo}
+            min={(editFrom && editFrom > todayLocalISO()) ? editFrom : todayLocalISO()}
+            onChange={(e) => setEditTo(e.target.value)}
+            disabled={deleting}
+          />
+        </div>
+      </div>
+
+      <div className="mt-4 flex justify-end gap-2">
+        <button
+          className="px-4 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800 disabled:opacity-50"
+          onClick={() => setEditOpen(false)}
+          disabled={deleting}
+        >
+          Cancel
+        </button>
+        <button
+          className="px-4 py-2 rounded text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50"
+          onClick={async () => {
+            const today = todayLocalISO();
+            if (!editFrom || !editTo) { alert("Both Valid From and Valid To are required."); return; }
+            if (editTo < today) { alert("Valid To cannot be before today."); return; }
+            if (editTo < editFrom) { alert("Valid To must be on or after Valid From."); return; }
+            if (!editRow?.membershipId) { alert("Cannot update: missing membership id."); return; }
+
+            try {
+              const companyId =
+                editRow?._mem?.company?.companyId ||
+                (editRow?._user ? contractorCompanyId(editRow._user) : null);
+
+              const payload: any = {
+                validTo: editTo,
+                scopeType: "Project",
+                projectId: editRow.projectId,
+                ...(companyId ? { companyId } : {}),
+              };
+              if (!origFrom || editFrom !== origFrom) {
+                payload.validFrom = editFrom;
+              }
+
+              await api.patch(`/admin/assignments/${editRow.membershipId}`, payload);
+
+              const successMsg = [
+                `Updated validity`,
+                ``,
+                `Project: ${editRow.projectTitle}`,
+                `Contractor: ${editRow.userName}`,
+                ``,
+                `Valid From: ${origFrom || "—"} → ${editFrom}`,
+                `Valid To:   ${origTo || "—"} → ${editTo}`,
+              ].join("\n");
+
+              const { data: fresh } = await api.get("/admin/users", { params: { includeMemberships: "1" } });
+              setAllUsers(Array.isArray(fresh) ? fresh : (fresh?.users ?? []));
+
+              setEditOpen(false);
+              setEditRow(null);
+              setPendingEditAlert(successMsg);
+            } catch (e: any) {
+              const msg = e?.response?.data?.message || e?.response?.data?.error || e?.message || "Update failed.";
+              alert(msg);
+            }
+          }}
+          title="Update validity dates"
+          disabled={!editRow?.membershipId || deleting}
+        >
+          Update
+        </button>
+      </div>
+    </div>
+  </div>
+)}
+
     </div>
   );
 }

@@ -24,6 +24,8 @@ import { MaterialNewPage, MaterialEditPage } from './views/admin/ref/materiallib
 
 import ChecklistLib from './views/admin/ref/checklistlib/ChecklistLib';
 import { ChecklistEditPage, ChecklistNewPage } from './views/admin/ref/checklistlib/ChecklistForm';
+import Audit from './views/admin/Audit';
+
 
 // Role homes (create these files or swap with your actual components)
 import ClientHome from './views/client/clientHome';
@@ -55,8 +57,7 @@ export default function App() {
 
         {/* Admin area */}
         <Route
-          path="/admin"
-          element={<RequireAuth><AdminHome /></RequireAuth>}
+          path="/admin" element={<RequireAuth><AdminHome /></RequireAuth>}
         >
           <Route index element={<div className="p-4">Dashboard</div>} />
           <Route path="users" element={<Users />} />
@@ -95,6 +96,9 @@ export default function App() {
           <Route path="ref/checklistlib" element={<ChecklistLib />} />
           <Route path="ref/checklistlib/new" element={<ChecklistNewPage />} />
           <Route path="ref/checklistlib/:id/edit" element={<ChecklistEditPage />} />
+          
+            <Route path="audit" element={<Audit />} />
+
           {/* when no child path picked */}
         </Route>
 
