@@ -1,4 +1,4 @@
-// src/App.tsx
+// pms-frontend/src/App.tsx
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Login from './views/Login';
 import AdminHome from './views/admin/AdminHome';
@@ -24,17 +24,15 @@ import { MaterialNewPage, MaterialEditPage } from './views/admin/ref/materiallib
 
 import ChecklistLib from './views/admin/ref/checklistlib/ChecklistLib';
 import { ChecklistEditPage, ChecklistNewPage } from './views/admin/ref/checklistlib/ChecklistForm';
+import ModuleSettingsLayout from './views/admin/moduleSettings/ModuleSettingsLayout';
 import Audit from './views/admin/Audit';
 
 
-// Role homes (create these files or swap with your actual components)
-import ClientHome from './views/client/clientHome';
-import IHPmtHome from './views/ihpmt/ihpmtHome';
-import ContractorHome from './views/contractor/contractorHome';
-import ConsultantHome from './views/consultant/consultantHome';
-import SupplierHome from './views/supplier/supplierHome';
-import PMCHome from './views/pmc/pmcHome';
-
+// Unified Home
+import HomeLayout from './views/home/HomeLayout';
+import Welcome from './views/home/Welcome';
+import Tiles from './views/home/Tiles';
+import MyProjects from './views/home/MyProjects';
 
 // Optional generic landing
 function Landing() {
@@ -75,7 +73,7 @@ export default function App() {
           <Route path="companies/new" element={<CompanyCreate />} />
           <Route path="companies/:id/edit" element={<CompanyEdit />} />
 
-          {/* 👇 NEW: assignments use a param route; base redirects to 'clients' */}
+          {/* assignments use a param route; base redirects to 'clients' */}
           <Route path="assignments" element={<Navigate to="clients" replace />} />
           <Route path="assignments/:role" element={<Assignments />} />
 
@@ -96,19 +94,19 @@ export default function App() {
           <Route path="ref/checklistlib" element={<ChecklistLib />} />
           <Route path="ref/checklistlib/new" element={<ChecklistNewPage />} />
           <Route path="ref/checklistlib/:id/edit" element={<ChecklistEditPage />} />
-          
-            <Route path="audit" element={<Audit />} />
 
-          {/* when no child path picked */}
+          <Route path="module-settings" element={<ModuleSettingsLayout />}>
+
+          </Route>
+          <Route path="audit" element={<Audit />} />
         </Route>
 
-        {/* Role-based homes */}
-        <Route path="/clientHome" element={<RequireAuth><ClientHome /></RequireAuth>} />
-        <Route path="/ihpmtHome" element={<RequireAuth><IHPmtHome /></RequireAuth>} />
-        <Route path="/contractorHome" element={<RequireAuth><ContractorHome /></RequireAuth>} />
-        <Route path="/consultantHome" element={<RequireAuth><ConsultantHome /></RequireAuth>} />
-        <Route path="/supplierHome" element={<RequireAuth><SupplierHome /></RequireAuth>} />
-        <Route path="/pmcHome" element={<RequireAuth><PMCHome /></RequireAuth>} />
+        {/* Unified role-aware Home */}
+        <Route path="/home" element={<RequireAuth><HomeLayout /></RequireAuth>}>
+          <Route index element={<Welcome />} />
+          <Route path="tiles" element={<Tiles />} />
+          <Route path="my-projects" element={<MyProjects />} />
+        </Route>
 
         {/* Fallback generic landing (if you use /landing in Login.tsx fallback) */}
         <Route path="/landing" element={<RequireAuth><Landing /></RequireAuth>} />
@@ -116,7 +114,7 @@ export default function App() {
         {/* catch-all */}
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
-    </BrowserRouter>
+    </BrowserRouter >
   );
 
 }

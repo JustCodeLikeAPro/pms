@@ -79,6 +79,8 @@ export default function UserCreate() {
   // ---------- UI ----------
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Note modal
+  const [showNote, setShowNote] = useState(false);
 
   // --- Auth gate simple check ---
   useEffect(() => {
@@ -92,7 +94,8 @@ export default function UserCreate() {
       try {
         const [{ data: s }, { data: p }, { data: c }] = await Promise.all([
           api.get("/admin/states"),
-          api.get("/admin/projects", { params: { status: "Active" } }), // adjust as needed
+          // api.get("/admin/projects", { params: { status: "Active" } }),
+          api.get("/admin/projects"),
           api.get("/admin/companies-brief"),
         ]);
         setStates(Array.isArray(s) ? s : s?.states || []);
@@ -142,6 +145,21 @@ export default function UserCreate() {
   //   const values = Array.from(e.target.selectedOptions).map((o) => o.value);
   //   setSelectedProjectIds(values);
   // };
+  const normalizeDigits = (v: any) => String(v ?? "").replace(/\D/g, "");
+  const pickUserByPhone = (list: any[], desiredDigits: string) => {
+    if (!Array.isArray(list)) return null;
+    // try strict phone match first
+    const exact = list.find((u) => normalizeDigits(u?.phone) === desiredDigits);
+    if (exact) return exact;
+
+    // sometimes APIs keep countryCode separate; accept +91 + phone or countryCode "91"
+    const exactWithCCode = list.find((u) => {
+      const cc = normalizeDigits(u?.countryCode);
+      const ph = normalizeDigits(u?.phone);
+      return (cc === "91" || cc === "+91" || cc === "") && ph === desiredDigits;
+    });
+    return exactWithCCode || null;
+  };
 
   const submit = async () => {
     setErr(null);
@@ -149,6 +167,25 @@ export default function UserCreate() {
       setErr("First Name and a valid Mobile (India) are required.");
       return;
     }
+
+    // Affiliation must be Client and/or Service Provider (not neither)
+    if (!isClient && !isServiceProvider) {
+      window.alert(
+        "Affiliation required.\n\n" +
+        "Please mark the user as a Client and/or a Service Partner before creating."
+      );
+      return; // stop submit
+    }
+
+    //  If user is marked as a Service Provider but no companies are selected, warn & abort
+    if (isServiceProvider && selectedCompanyIds.length === 0) {
+      window.alert(
+        "This user is not linked to any Service Partner company.\n\n" +
+        "If they are NOT a service provider, please toggle “Are you working for any of our Service Partner?” to No before saving."
+      );
+      return; // stop submit
+    }
+
 
     // 1) Create user
     try {
@@ -234,8 +271,79 @@ export default function UserCreate() {
 
       nav("/admin/users", { replace: true });
     } catch (e: any) {
-      setErr(e?.response?.data?.error || e?.message || "Failed to create user");
-    } finally {
+      // Handle "existing phone" gracefully
+      const httpStatus = e?.response?.status;
+      const serverMsg = e?.response?.data?.error || e?.message || "";
+
+      const looksLikeDuplicate =
+        httpStatus === 500 || httpStatus === 409 || /duplicate|exists/i.test(serverMsg);
+
+      if (looksLikeDuplicate) {
+        try {
+          const targetDigits = phoneClean; // already digits-only in your code
+          let u: any | null = null;
+
+          // 1) Try /admin/users?phone=XXXXX (prefer exact match in results)
+          try {
+            const res = await api.get("/admin/users", { params: { phone: targetDigits } });
+            const list = Array.isArray(res?.data) ? res.data : (res?.data?.users || []);
+            u = pickUserByPhone(list, targetDigits);
+          } catch { /* noop */ }
+
+          // 2) Lookup route
+          if (!u) {
+            try {
+              const res = await api.get("/admin/users/lookup", { params: { phone: targetDigits } });
+              const candidate = res?.data?.user;
+              if (candidate && normalizeDigits(candidate.phone) === targetDigits) {
+                u = candidate;
+              }
+            } catch { /* noop */ }
+          }
+
+          // 3) Generic search, but STILL pick by exact phone digits
+          if (!u) {
+            try {
+              const res = await api.get("/admin/users", { params: { search: targetDigits } });
+              const list = Array.isArray(res?.data) ? res.data : (res?.data?.users || []);
+              u = pickUserByPhone(list, targetDigits);
+            } catch { /* noop */ }
+          }
+
+          if (u?.userId) {
+            const fullName = [u.firstName, u.middleName, u.lastName].filter(Boolean).join(" ");
+            const codeLine = u.userCode ? `Code: ${u.userCode}\n` : "";
+            const phoneLine = `Phone: +91 ${normalizeDigits(u.phone) || targetDigits}`;
+
+            const proceedToEdit = window.confirm(
+              "A user with this mobile number already exists.\n\n" +
+              `${codeLine}Name: ${fullName || "(no name)"}\n${phoneLine}\n\n` +
+              "Press OK to open that user's Edit page.\n" +
+              "Press Cancel to stay here — the save will be canceled."
+            );
+
+            if (proceedToEdit) {
+              nav(`/admin/users/${u.userId}/edit`, { replace: true });
+            }
+            // Either way, stop this create flow.
+            return;
+          }
+
+          // If no exact match found, warn but don't redirect to a wrong user
+          const openList = window.confirm(
+            "A user with this mobile number already exists, but we couldn't fetch an exact match automatically.\n\n" +
+            `Phone: +91 ${targetDigits}\n\n` +
+            "Press OK to open the Users list, or Cancel to stay here (save canceled)."
+          );
+          if (openList) nav("/admin/users");
+          return;
+        } finally {
+          setSaving(false);
+        }
+      }
+
+      // Default error handling (non-duplicate case)
+      setErr(serverMsg || "Failed to create user");
       setSaving(false);
     }
   };
@@ -252,6 +360,14 @@ export default function UserCreate() {
             </p>
           </div>
           <div className="flex gap-2">
+            {/* Note button (opens modal) */}
+            <button
+              className="px-4 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800"
+              onClick={() => setShowNote(true)}
+              type="button"
+            >
+              Note
+            </button>
             <button
               className="px-4 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800"
               onClick={() => nav("/admin/users")}
@@ -466,6 +582,73 @@ export default function UserCreate() {
           </button>
         </div>
       </div>
+      {/* NOTE MODAL */}
+      {showNote && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="note-modal-title"
+        >
+          <div className="w-full max-w-2xl rounded-2xl bg-white dark:bg-neutral-900 border dark:border-neutral-800 shadow-xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b dark:border-neutral-800">
+              <h2 id="note-modal-title" className="text-base font-semibold dark:text-white">
+                Note for Admins — Creating a New User
+              </h2>
+              <button
+                onClick={() => setShowNote(false)}
+                className="rounded px-2 py-1 text-sm hover:bg-gray-100 dark:hover:bg-neutral-800"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="px-5 py-4 text-sm space-y-3 text-gray-800 dark:text-gray-100">
+              <p><b>Required to save:</b> First Name and a 10-digit Indian mobile number.</p>
+
+              <p><b>Affiliation is mandatory:</b> Mark the person as Client and/or Service Partner.
+                (At least one must be selected.)</p>
+
+              <p>If you choose <b>Service Partner = Yes</b>, you must also pick at least one company from the list.</p>
+
+              <p><b>Location fields</b> (State, District, City, PIN, Address) are helpful but optional.</p>
+
+              <p><b>Photo</b> upload is optional. If it fails, the user can still be created.</p>
+
+              <div className="space-y-2">
+                <p><b>If the mobile number already belongs to someone:</b></p>
+                <ul className="list-disc ml-5 space-y-1">
+                  <li>You’ll see a message with that person’s details.</li>
+                  <li><b>OK</b> takes you straight to that person’s <b>Edit</b> page so you can update them.</li>
+                  <li><b>Cancel</b> keeps you on this page and stops the save (no duplicate will be created).</li>
+                  <li>If we can’t clearly find the exact person, you can choose <b>OK</b> to open the Users list and search, or <b>Cancel</b> to stay here (save is canceled).</li>
+                </ul>
+              </div>
+
+              <div className="space-y-2">
+                <p><b>For Super Admins only:</b></p>
+                <ul className="list-disc ml-5 space-y-1">
+                  <li>You’ll see extra switches for <b>Super Admin</b> and <b>Admin (Global)</b> access. Turning these on gives broader access; turning them off does not block creating the user.</li>
+                </ul>
+              </div>
+
+              <p><b>After a successful save:</b> you’ll be taken back to the Users page.</p>
+            </div>
+
+            <div className="px-5 py-3 border-t dark:border-neutral-800 flex justify-end gap-2">
+              <button
+                onClick={() => setShowNote(false)}
+                className="px-4 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800"
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

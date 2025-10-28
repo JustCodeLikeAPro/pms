@@ -99,6 +99,7 @@ function clearSavedLogins() {
 }
 
 // Map role (handles Admin/Client/IH-PMT/IH_PMT/PMC/…)
+// (kept for now; no longer used for post-login routing)
 function mapRoleToPath(role: string): string {
   const norm = (role || '')
     .toString()
@@ -106,19 +107,37 @@ function mapRoleToPath(role: string): string {
     .replace(/[_\s-]+/g, '') // IH-PMT / IH_PMT → ihpmt
     .toLowerCase();
   switch (norm) {
-    case 'admin': return '/admin';
-    case 'client': return '/clientHome';
-    case 'ihpmt': return '/ihpmtHome';
-    case 'pmc': return '/pmcHome';
-    case 'contractor': return '/contractorHome';
-    case 'consultant': return '/consultantHome';
-    case 'supplier': return '/supplierHome';
-    default: return '/landing';
+    case 'admin':
+      return '/admin';
+    case 'client':
+      return '/clientHome';
+    case 'ihpmt':
+      return '/ihpmtHome';
+    case 'pmc':
+      return '/pmcHome';
+    case 'contractor':
+      return '/contractorHome';
+    case 'consultant':
+      return '/consultantHome';
+    case 'supplier':
+      return '/supplierHome';
+    default:
+      return '/landing';
   }
 }
 
 const isClientRole = (role?: string) =>
   (role || '').toString().trim().replace(/[_\s-]+/g, '').toLowerCase() === 'client';
+
+// NEW: service provider roles helper (Contractor/Consultant/PMC/Supplier)
+const isServiceProviderRole = (role?: string) => {
+  const norm = (role || '').toString().trim().replace(/[_\s-]+/g, '').toLowerCase();
+  return ['contractor', 'consultant', 'pmc', 'supplier'].includes(norm);
+};
+
+// IH-PMT role helper (covers 'IH-PMT' and 'IH_PMT')
+const isIHPMTRole = (role?: string) =>
+  (role || '').toString().trim().replace(/[_\s-]+/g, '').toLowerCase() === 'ihpmt';
 
 export default function Login() {
   // Prefill username from MRU
@@ -146,8 +165,12 @@ export default function Login() {
     setRoleOptions([]);
 
     // clear any auth remnants
-    try { localStorage.removeItem('token'); } catch { }
-    try { sessionStorage.removeItem('otpSession'); } catch { }
+    try {
+      localStorage.removeItem('token');
+    } catch { }
+    try {
+      sessionStorage.removeItem('otpSession');
+    } catch { }
 
     setStep('enter');
     setBusy(false);
@@ -158,21 +181,51 @@ export default function Login() {
   const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
   const [selectedMembershipId, setSelectedMembershipId] = useState<string | null>(null);
 
-  // ---- NEW: de-duplicate Client role to a single option ----
+  // ---- UPDATED: keep exactly one Client (even if project-scoped),
+  // drop ALL project-scoped options for others, de-dup SP by role+company,
+  // and normalize labels (Client, IH-PMT)
   const roleOptionsDeduped = useMemo(() => {
     let clientTaken = false;
+    const spSeen = new Set<string>(); // `${normRole}::${companyId || 'none'}`
+
     return (roleOptions || []).reduce<RoleOption[]>((acc, r) => {
-      const isClient = isClientRole(r.role as string);
+      const normRole = (r.role || '').toString().trim().replace(/[_\s-]+/g, '').toLowerCase();
+      const isClient = normRole === 'client';
+      const isSP = ['contractor', 'consultant', 'pmc', 'supplier'].includes(normRole);
+
+      // Normalize label for Client & IH-PMT
+      const normalizedLabel = isClient
+        ? 'Client'
+        : isIHPMTRole(r.role)
+          ? r.label.replace(/^IH[_\s-]*PMT/i, 'IH-PMT')
+          : r.label;
+
+      // ✅ Always allow exactly ONE Client option (even if it came as Project)
       if (isClient) {
-        if (clientTaken) return acc; // drop duplicates
+        if (clientTaken) return acc;
         clientTaken = true;
-        acc.push({ ...r, label: 'Client' }); // normalize label
+        acc.push({ ...r, label: normalizedLabel });
         return acc;
       }
-      acc.push(r);
+
+      // For non-Client roles, remove all project-scoped options (no roles show projects)
+      if (r.scopeType === 'Project') return acc;
+
+      // De-dup service providers by role+company (keep company-based only)
+      if (isSP) {
+        const key = `${normRole}::${r.company?.id || 'none'}`;
+        if (spSeen.has(key)) return acc;
+        spSeen.add(key);
+        acc.push({ ...r, label: normalizedLabel });
+        return acc;
+      }
+
+      // Others (Admin / IH-PMT) – keep (with normalized label)
+      acc.push({ ...r, label: normalizedLabel });
       return acc;
     }, []);
   }, [roleOptions]);
+
 
   // saved usernames UI
   const [savedLogins, setSavedLogins] = useState<string[]>(() => readSavedLogins());
@@ -186,7 +239,9 @@ export default function Login() {
   const nav = useNavigate();
 
   // --- Effects ---
-  useEffect(() => { setActiveIdx(-1); }, [login]);
+  useEffect(() => {
+    setActiveIdx(-1);
+  }, [login]);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -274,10 +329,7 @@ export default function Login() {
 
       // Try to capture any token the backend might give us (even in choose-role)
       const bootstrapToken =
-        (data as any).token ||
-        (data as any).jwt?.token ||
-        (data as any).jwtToken ||
-        null;
+        (data as any).token || (data as any).jwt?.token || (data as any).jwtToken || null;
 
       if (bootstrapToken) {
         localStorage.setItem('token', bootstrapToken);
@@ -306,14 +358,15 @@ export default function Login() {
       // Final token path → route
       const token = (data as any).token || bootstrapToken;
       const payload = token ? decodeJwtPayload(token) : null;
-      const isAdmin = !!(payload && payload.isSuperAdmin) || !!(data as any).user?.isSuperAdmin;
+      const isAdmin =
+        !!(payload && payload.isSuperAdmin) || !!(data as any).user?.isSuperAdmin;
 
-      if (isAdmin) return forceNavigate('/admin');
+      if (isAdmin) {
+        return forceNavigate('/admin');
+      }
 
-      const roleInJwt = payload?.userRole || payload?.role;
-      if (roleInJwt) return forceNavigate(mapRoleToPath(String(roleInJwt)));
-
-      return forceNavigate('/landing');
+      // ✅ unified home for everyone else
+      return forceNavigate('/home');
     } catch (e: any) {
       setErr(e?.response?.data?.error || 'Failed to verify OTP');
     } finally {
@@ -329,7 +382,9 @@ export default function Login() {
 
     const storedToken = localStorage.getItem('token');
     const otpSessionRaw = sessionStorage.getItem('otpSession');
-    const otpSession = otpSessionRaw ? JSON.parse(otpSessionRaw) as { login?: string; otp?: string; token?: string | null } : null;
+    const otpSession = otpSessionRaw
+      ? (JSON.parse(otpSessionRaw) as { login?: string; otp?: string; token?: string | null })
+      : null;
 
     // Prefer any available token (localStorage or interim one from otpSession)
     const bearer = storedToken || otpSession?.token || null;
@@ -361,12 +416,20 @@ export default function Login() {
       localStorage.setItem('user', JSON.stringify(data.user || {}));
       sessionStorage.removeItem('otpSession');
 
-      const target = mapRoleToPath(String(data.role.role));
-      forceNavigate(target);
+      // Admin → /admin, everyone else → /home
+      const roleNorm = String(data.role.role || '')
+        .trim()
+        .replace(/[_\s-]+/g, '')
+        .toLowerCase();
+      if (roleNorm === 'admin' || data.user?.isSuperAdmin) {
+        return forceNavigate('/admin');
+      }
+      return forceNavigate('/home');
     } catch (e: any) {
-      const msg = e?.response?.status === 401
-        ? 'Unauthorized. Your session may have expired. Please try again.'
-        : (e?.response?.data?.error || 'Failed to assume role');
+      const msg =
+        e?.response?.status === 401
+          ? 'Unauthorized. Your session may have expired. Please try again.'
+          : e?.response?.data?.error || 'Failed to assume role';
       setErr(msg);
     } finally {
       setBusy(false);
@@ -385,7 +448,6 @@ export default function Login() {
   const onEnterOtp = (e: React.KeyboardEvent<HTMLInputElement>) =>
     e.key === 'Enter' && code.trim().length >= 6 && verify();
 
-
   // commit a suggestion
   const commitSelection = (index: number) => {
     const val = filteredSuggestions[index];
@@ -401,28 +463,51 @@ export default function Login() {
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
-        if (!open) { setShowSuggestions(true); setActiveIdx(0); }
-        else { setActiveIdx((p) => (p + 1) % filteredSuggestions.length); }
+        if (!open) {
+          setShowSuggestions(true);
+          setActiveIdx(0);
+        } else {
+          setActiveIdx((p) => (p + 1) % filteredSuggestions.length);
+        }
         break;
       case 'ArrowUp':
         e.preventDefault();
-        if (!open) { setShowSuggestions(true); setActiveIdx(filteredSuggestions.length - 1); }
-        else { setActiveIdx((p) => (p - 1 + filteredSuggestions.length) % filteredSuggestions.length); }
+        if (!open) {
+          setShowSuggestions(true);
+          setActiveIdx(filteredSuggestions.length - 1);
+        } else {
+          setActiveIdx((p) => (p - 1 + filteredSuggestions.length) % filteredSuggestions.length);
+        }
         break;
       case 'Home':
-        if (open) { e.preventDefault(); setActiveIdx(0); }
+        if (open) {
+          e.preventDefault();
+          setActiveIdx(0);
+        }
         break;
       case 'End':
-        if (open) { e.preventDefault(); setActiveIdx(filteredSuggestions.length - 1); }
+        if (open) {
+          e.preventDefault();
+          setActiveIdx(filteredSuggestions.length - 1);
+        }
         break;
       case 'Enter':
-        if (open && activeIdx >= 0) { e.preventDefault(); commitSelection(activeIdx); }
-        else { validateUser(); }
+        if (open && activeIdx >= 0) {
+          e.preventDefault();
+          commitSelection(activeIdx);
+        } else {
+          validateUser();
+        }
         break;
       case 'Escape':
-        if (open) { e.preventDefault(); setShowSuggestions(false); setActiveIdx(-1); }
+        if (open) {
+          e.preventDefault();
+          setShowSuggestions(false);
+          setActiveIdx(-1);
+        }
         break;
-      default: break;
+      default:
+        break;
     }
   };
 
@@ -519,7 +604,9 @@ export default function Login() {
                                 }}
                                 className={
                                   'w-full text-left px-3 py-2 ' +
-                                  (active ? 'bg-emerald-50 dark:bg-neutral-700' : 'hover:bg-emerald-50 dark:hover:bg-neutral-700')
+                                  (active
+                                    ? 'bg-emerald-50 dark:bg-neutral-700'
+                                    : 'hover:bg-emerald-50 dark:hover:bg-neutral-700')
                                 }
                               >
                                 {s}
@@ -532,17 +619,31 @@ export default function Login() {
                   )}
                 </div>
 
-                <button type="button" onClick={validateUser} className={btnPrimary} disabled={busy || !login.trim()}>
+                <button
+                  type="button"
+                  onClick={validateUser}
+                  className={btnPrimary}
+                  disabled={busy || !login.trim()}
+                >
                   {busy ? 'Checking…' : 'Send OTP'}
                 </button>
 
                 {/* Remember + Manage */}
                 <div className="mt-2 flex items-center justify-between">
                   <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
-                    <input type="checkbox" className="h-4 w-4" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={remember}
+                      onChange={(e) => setRemember(e.target.checked)}
+                    />
                     Remember me on this device
                   </label>
-                  <button type="button" className="text-sm text-emerald-700 hover:underline" onClick={() => setShowManage(true)}>
+                  <button
+                    type="button"
+                    className="text-sm text-emerald-700 hover:underline"
+                    onClick={() => setShowManage(true)}
+                  >
                     Manage saved logins
                   </button>
                 </div>
@@ -593,14 +694,18 @@ export default function Login() {
                   </button>
                 </div>
 
-                <button type="button" onClick={verify} className={btnPrimary} disabled={busy || code.trim().length < 6}>
+                <button
+                  type="button"
+                  onClick={verify}
+                  className={btnPrimary}
+                  disabled={busy || code.trim().length < 6}
+                >
                   {busy ? 'Verifying…' : 'Verify & Continue'}
                 </button>
 
                 <button type="button" onClick={handleBackFromOtp} className={btnSecondary}>
                   Back
                 </button>
-
               </>
             )}
 
@@ -612,7 +717,13 @@ export default function Login() {
                 <div className="space-y-2">
                   {roleOptionsDeduped.map((r) => {
                     const roleIsClient = isClientRole(r.role as string);
-                    const displayLabel = roleIsClient ? 'Client' : r.label;
+                    //const roleIsSP = isServiceProviderRole(r.role as string);
+                    const roleIsIHPMT = isIHPMTRole(r.role as string);
+                    const displayLabel = roleIsClient
+                      ? 'Client'
+                      : roleIsIHPMT
+                        ? r.label.replace(/^IH[_\s-]*PMT/i, 'IH-PMT') // ensure dash
+                        : r.label;
 
                     return (
                       <label
@@ -632,18 +743,12 @@ export default function Login() {
                           <div className="font-medium dark:text-white">{displayLabel}</div>
 
                           <div className="text-xs text-gray-600 dark:text-gray-400">
-                            {/* company info for service providers */}
-                            {r.scopeType === 'Company' && r.company
-                              ? `Company: ${r.company.name} (${r.company.role})`
-                              : null}
-
-                            {/* hide project details for Client */}
-                            {r.scopeType === 'Project' && r.project && !roleIsClient
-                              ? `Project: ${r.project.title}${r.project.code ? ` (${r.project.code})` : ''}`
-                              : null}
-
+                            {/* Show company only for service providers; 
+                            {roleIsSP && r.company ? `Company: ${r.company.name}` : null}
+                            No projects for any role */}
                             {r.scopeType === 'Global' ? 'Global scope' : null}
                           </div>
+
                         </div>
                       </label>
                     );
@@ -673,7 +778,10 @@ export default function Login() {
             <div className="w-full max-w-lg rounded-xl bg-white dark:bg-neutral-900 border dark:border-neutral-800 shadow-lg">
               <div className="flex items-center justify-between p-4 border-b dark:border-neutral-800">
                 <h3 className="text-lg font-semibold dark:text-white">Saved logins</h3>
-                <button className="px-2 py-1 rounded border text-sm hover:bg-gray-50 dark:hover:bg-neutral-800" onClick={() => setShowManage(false)}>
+                <button
+                  className="px-2 py-1 rounded border text-sm hover:bg-gray-50 dark:hover:bg-neutral-800"
+                  onClick={() => setShowManage(false)}
+                >
                   Close
                 </button>
               </div>
@@ -701,7 +809,9 @@ export default function Login() {
                 )}
               </div>
               <div className="p-4 border-t dark:border-neutral-800 flex items-center justify-between">
-                <div className="text-xs text-gray-600 dark:text-gray-400">Removing does not affect server accounts—only local suggestions.</div>
+                <div className="text-xs text-gray-600 dark:text-gray-400">
+                  Removing does not affect server accounts—only local suggestions.
+                </div>
                 <button
                   className="px-3 py-1.5 rounded bg-red-600 text-white text-sm disabled:opacity-60"
                   disabled={savedLogins.length === 0}
