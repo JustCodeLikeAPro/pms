@@ -27,12 +27,15 @@ import { ChecklistEditPage, ChecklistNewPage } from './views/admin/ref/checklist
 import ModuleSettingsLayout from './views/admin/moduleSettings/ModuleSettingsLayout';
 import Audit from './views/admin/Audit';
 
-
 // Unified Home
 import HomeLayout from './views/home/HomeLayout';
 import Welcome from './views/home/Welcome';
 import Tiles from './views/home/Tiles';
 import MyProjects from './views/home/MyProjects';
+import WIR_Contractor from './views/home/modules/WIR/WIR.Contractor';
+import WIR_PMC from './views/home/modules/WIR/WIR.PMC';
+import WIR_IHPMT from './views/home/modules/WIR/WIR.IHPMT';
+import WIR_Client from './views/home/modules/WIR/WIR.Client';
 
 // Optional generic landing
 function Landing() {
@@ -54,9 +57,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
 
         {/* Admin area */}
-        <Route
-          path="/admin" element={<RequireAuth><AdminHome /></RequireAuth>}
-        >
+        <Route path="/admin" element={<RequireAuth><AdminHome /></RequireAuth>}>
           <Route index element={<div className="p-4">Dashboard</div>} />
           <Route path="users" element={<Users />} />
           <Route path="users/:id" element={<Users />} />
@@ -68,21 +69,24 @@ export default function App() {
           <Route path="projects/new" element={<ProjectCreate />} />
           <Route path="projects/:id/edit" element={<ProjectEdit />} />
 
+          {/* companies */}
           <Route path="companies" element={<Companies />} />
           <Route path="companies/:id" element={<Companies />} />
           <Route path="companies/new" element={<CompanyCreate />} />
           <Route path="companies/:id/edit" element={<CompanyEdit />} />
 
-          {/* assignments use a param route; base redirects to 'clients' */}
+          {/* assignments */}
           <Route path="assignments" element={<Navigate to="clients" replace />} />
           <Route path="assignments/:role" element={<Assignments />} />
 
+          {/* permissions */}
           <Route path="permissions" element={<Permissions />} />
           <Route path="permissions/templates" element={<AdminPermTemplates />} />
           <Route path="permissions/project-overrides" element={<AdminPermProjectOverrides />} />
 
           <Route path="permission-explorer" element={<AdminPermUserOverrides />} />
 
+          {/* refs */}
           <Route path="ref/activitylib" element={<ActivityLib />} />
           <Route path="ref/activitylib/:id/edit" element={<ActivityEdit />} />
           <Route path="ref/activitylib/new" element={<ActivityCreate />} />
@@ -95,9 +99,7 @@ export default function App() {
           <Route path="ref/checklistlib/new" element={<ChecklistNewPage />} />
           <Route path="ref/checklistlib/:id/edit" element={<ChecklistEditPage />} />
 
-          <Route path="module-settings" element={<ModuleSettingsLayout />}>
-
-          </Route>
+          <Route path="module-settings" element={<ModuleSettingsLayout />} />
           <Route path="audit" element={<Audit />} />
         </Route>
 
@@ -106,15 +108,16 @@ export default function App() {
           <Route index element={<Welcome />} />
           <Route path="tiles" element={<Tiles />} />
           <Route path="my-projects" element={<MyProjects />} />
+          <Route path="contractor/projects/:projectId/wir" element={<WIR_Contractor />} />
+          <Route path="pmc/projects/:projectId/wir" element={<WIR_PMC />} />
+          <Route path="ihpmt/projects/:projectId/wir" element={<WIR_IHPMT />} />
+          <Route path="client/projects/:projectId/wir" element={<WIR_Client />} />
         </Route>
 
-        {/* Fallback generic landing (if you use /landing in Login.tsx fallback) */}
+        {/* Fallback */}
         <Route path="/landing" element={<RequireAuth><Landing /></RequireAuth>} />
-
-        {/* catch-all */}
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
-    </BrowserRouter >
+    </BrowserRouter>
   );
-
 }
