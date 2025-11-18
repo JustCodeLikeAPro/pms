@@ -1,7 +1,25 @@
 // pms-frontend/src/views/home/modules/WIR/WIR.Contractor.tsx
+// === [Runner_0] === Imports and Utilities
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { api } from "../../../../api/client";
+import {
+  listWir as apiListWir,
+  getWir as apiGetWir,
+  createWir as apiCreateWir,
+  updateWir as apiUpdateWir,
+  deleteWir as apiDeleteWir,
+  submitWir as apiSubmitWir,
+  recommendWir as apiRecommendWir,
+  approveWir as apiApproveWir,
+  rescheduleWir as apiRescheduleWir,
+  getWirHistory as apiGetWirHistory,
+  listWirDiscussions as apiListWirDiscussions,
+  postWirDiscussionMessage as apiPostWirDiscussionMessage,
+  saveWirRunnerInspector,
+  saveWirRunnerHod,
+  getWir,
+} from "../../../../api/wir";
 import { useAuth } from "../../../../hooks/useAuth";
 import { getRoleBaseMatrix } from "../../../admin/permissions/AdminPermProjectOverrides";
 import { getModuleSettings } from "../../../../api/adminModuleSettings";
@@ -126,21 +144,19 @@ function SoftPill({
 
   if (!l && !v) return null;
 
-  const toneCls: Record<string, string> = {
+  const toneCls: Record<SoftTone, string> = {
     neutral:
-      "rounded-full border border-neutral-200 bg-white text-neutral-800 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-100",
-    amber:
-      "rounded-full border border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
-    emerald:
-      "rounded-full border border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300",
-    rose:
-      "rounded-full border border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-800 dark:bg-rose-900/30 dark:text-rose-300",
-    blue:
-      "rounded-full border border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
+      "border dark:border-neutral-800 bg-gray-50 text-gray-800 dark:bg-neutral-800 dark:text-gray-200",
+    info:
+      "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
+    success:
+      "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300",
+    warning:
+      "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
+    danger:
+      "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-800 dark:bg-rose-900/30 dark:text-rose-300",
     gray:
-      "rounded-full border border-neutral-200 bg-gray-50 text-gray-800 dark:border-neutral-800 dark:bg-neutral-900 dark:text-gray-200",
-    indigo:
-      "rounded-full border border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300",
+      "border dark:border-neutral-800 bg-gray-50 text-gray-800 dark:bg-neutral-900 dark:text-gray-200",
   };
 
   return (
@@ -157,7 +173,13 @@ function SoftPill({
 }
 
 type RunnerCardItem = {
+  /** Stable UI key: prefer WIR item id (wid) else checklist item id (cid) */
   id: string;
+  /** WIR item id (DB id) – used for saving to BE when present */
+  wid?: string | null;
+  /** RefChecklist item id – used to compose the full list and as fallback id */
+  cid?: string | null;
+
   title: string;
   code?: string | null;
   unit?: string | null;
@@ -413,76 +435,6 @@ function numOrNull(x: any): number | null {
 function fix(n: number, dp = 3) {
   return n.toFixed(dp);
 }
-/** Build human string like:
- *  "= 20.000 mm/m"         (exact)
- *  "≤ 20.000 mm/m"         (max)
- *  "≥ 20.000 mm/m"         (min)
- *  "19.400 to 20.200 mm/m" (range from base±(minus/plus))
- *  If only base present, defaults to "= base".
- */
-function buildRequirementLabel(opts: {
-  unit?: string | null;
-  op?: string | null;       // '=', '<=', '≥', '>=', '<', '>' (normalized)
-  base?: any;
-  plus?: any;
-  minus?: any;
-  dp?: number;
-}): string {
-  const dp = opts.dp ?? 3;
-  const u = (opts.unit ? ` ${opts.unit}` : "");
-  const base = numOrNull(opts.base);
-  const plus = numOrNull(opts.plus);
-  const minus = numOrNull(opts.minus);
-  const rawOp = (opts.op || "").trim();
-  const op = rawOp
-    .replace(/^>=?$/, "≥")
-    .replace(/^<=?$/, "≤")
-    .replace(/^=$/, "=")
-    .replace(/^>$/, ">")
-    .replace(/^<$/, "<");
-
-  // If explicit operator + base exist -> show "op base"
-  if (base != null && ["=", "≤", "≥", ">", "<"].includes(op)) {
-    return `${op} ${fix(base, dp)}${u}`;
-  }
-
-  // If we have base ± (plus/minus)
-  if (base != null && plus != null && minus != null) {
-    const lo = base - minus;
-    const hi = base + plus;
-    return `${fix(lo, dp)} to ${fix(hi, dp)}${u}`;
-  }
-
-  // Only one side present => convert to bound against base
-  if (base != null && plus != null) {
-    return `≤ ${fix(base + plus, dp)}${u}`;
-  }
-  if (base != null && minus != null) {
-    return `≥ ${fix(base - minus, dp)}${u}`;
-  }
-
-  // Fallback: just base
-  if (base != null) return `= ${fix(base, dp)}${u}`;
-
-  // Nothing usable
-  return u ? `—${u}` : "—";
-}
-
-/** Try to normalize an operator from a freeform tolerance string like
- *  "≤ 20 mm/m", "<= 25", "= 10", "max 20" (returns '≤', '≥', '=', '<', '>' or '').
- */
-function inferOpFromToleranceString(tol?: string | null): string {
-  const s = (tol || "").trim();
-  if (!s) return "";
-  if (/^=/.test(s)) return "=";
-  if (/^(<=|≤)/.test(s)) return "≤";
-  if (/^(>=|≥)/.test(s)) return "≥";
-  if (/^</.test(s)) return "<";
-  if (/^>/.test(s)) return ">";
-  if (/^max\b/i.test(s)) return "≤";
-  if (/^min\b/i.test(s)) return "≥";
-  return "";
-}
 
 const isIsoLike = (v: any) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v);
 const fmtDate = (v: any) => (isIsoLike(v) ? new Date(v).toLocaleDateString() : v ?? "");
@@ -538,6 +490,18 @@ type WirRecord = {
 
   wasRescheduled?: boolean;     // derived boolean
   lastRescheduledAt?: string | null; // optional display/tooltip
+
+  // Carry runner state from backend so Runner effect can hydrate
+  runnerInspector?: {
+    items?: any[];                  // { itemId, checklistItemId, status, measurement, remark, ... }
+    overallRecommendation?: "APPROVE" | "APPROVE_WITH_COMMENTS" | "REJECT" | null;
+  } | null;
+
+  runnerHod?: {
+    items?: any[];                  // { itemId, checklistItemId, hodRemark, hodLastSavedAt, ... }
+    overallOutcome?: "ACCEPT" | "RETURN" | "REJECT" | null;
+    overallNotes?: string | null;
+  } | null;
 };
 
 type FetchState = {
@@ -608,6 +572,146 @@ async function apiGetSafe<T = any>(
   }
 }
 
+async function fetchDiscussion(
+  pid: string,
+  wid: string
+): Promise<DiscussionMsg[]> {
+  const data = await apiListWirDiscussions(pid, wid);
+  // Support plain array or wrapped { items / rows }
+  const arr: any[] = Array.isArray(data)
+    ? data
+    : data?.items || data?.rows || [];
+
+  const msgs: DiscussionMsg[] = arr.map((r: any) => {
+    const createdAt =
+      r.createdAt || r.created_at || r.created_on || new Date().toISOString();
+
+    // Try to resolve authorName from denormalized field or related `author`
+    const authorName =
+      r.authorName ??
+      (r.author
+        ? `${r.author.firstName ?? ""} ${r.author.lastName ?? ""}`.trim() ||
+        undefined
+        : undefined);
+
+    // ---- ATTACHMENTS MAPPING (robust to different backend shapes) ----
+    let fileUrl: string | null =
+      r.fileUrl ??
+      r.fileURL ??
+      r.attachmentUrl ??
+      r.attachmentURL ??
+      null;
+
+    let fileName: string | null =
+      r.fileName ??
+      r.filename ??
+      r.attachmentName ??
+      r.attachmentFilename ??
+      null;
+
+    // If not flat fields, try array/object forms like { attachments: [...] } or { files: [...] }
+    if (!fileUrl) {
+      const filesArr: any[] = Array.isArray(r.attachments)
+        ? r.attachments
+        : Array.isArray(r.files)
+          ? r.files
+          : [];
+
+      if (filesArr.length > 0) {
+        const f = filesArr[0] || {};
+        fileUrl =
+          f.url ??
+          f.downloadUrl ??
+          f.href ??
+          f.fileUrl ??
+          null;
+        fileName =
+          fileName ??
+          f.name ??
+          f.fileName ??
+          f.filename ??
+          null;
+      }
+    }
+
+    return {
+      id: String(r.id ?? ""),
+      wirId: String(r.wirId ?? wid),
+      authorId: String(r.authorId ?? ""),
+      authorName,
+      // use `body` as the actual message text, with fallbacks
+      notes: String(
+        r.body ?? // Prisma column
+        r.notes ?? // in case controller renamed it
+        r.message ??
+        ""
+      ),
+      createdAt: String(createdAt),
+      fileUrl: fileUrl || undefined,
+      fileName: fileName || undefined,
+    };
+  });
+
+  // Oldest first (if you want latest first, reverse this sort)
+  msgs.sort(
+    (a, b) =>
+      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+
+  return msgs;
+}
+
+/** POST comment + optional file.
+ *  NOTE: backend currently accepts JSON body only; payload.file is ignored for now.
+ */
+async function postDiscussion(
+  pid: string,
+  wid: string,
+  payload: DiscussionPayload
+): Promise<DiscussionMsg> {
+  const data = await apiPostWirDiscussionMessage(pid, wid, {
+    body: payload.notes,   // matches Prisma column
+    notes: payload.notes,  // in case controller uses `notes`
+    authorId: payload.authorId,
+  });
+
+  const createdAt =
+    data?.createdAt || data?.created_at || data?.created_on || new Date().toISOString();
+
+  const authorName =
+    data?.authorName ??
+    (data?.author
+      ? `${data.author.firstName ?? ""} ${data.author.lastName ?? ""}`.trim() ||
+      undefined
+      : undefined);
+
+  const fileUrl =
+    data?.fileUrl ??
+    data?.attachmentUrl ??
+    null;
+
+  const fileName =
+    data?.fileName ??
+    data?.attachmentName ??
+    null;
+
+  return {
+    id: String(data?.id ?? data?.commentId ?? crypto.randomUUID()),
+    wirId: String(wid),
+    authorId: String(data?.authorId ?? payload.authorId),
+    authorName,
+    notes: String(
+      data?.body ??       // Prisma column
+      data?.notes ??    // if controller remaps to notes
+      data?.message ??  // older shapes
+      payload.notes
+    ),
+    createdAt: String(createdAt),
+    fileUrl,
+    fileName,
+  };
+}
+
 // --- Checklist items-count cache ---
 type ChecklistCountMap = Record<string, number>;
 
@@ -643,28 +747,27 @@ function KpiPill({
   if (!v) return null;
 
   const toneCls: Record<string, string> = {
-    neutral:
-      "rounded-full border border-neutral-200 bg-white text-neutral-800 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-100",
+    neutral: "border dark:border-neutral-800 bg-white dark:bg-neutral-900",
     amber:
-      "rounded-full border border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
+      "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
     emerald:
-      "rounded-full border border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300",
+      "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300",
     rose:
-      "rounded-full border border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-800 dark:bg-rose-900/30 dark:text-rose-300",
+      "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-800 dark:bg-rose-900/30 dark:text-rose-300",
     blue:
-      "rounded-full border border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
+      "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
     gray:
-      "rounded-full border border-neutral-200 bg-gray-50 text-gray-800 dark:border-neutral-800 dark:bg-neutral-900 dark:text-gray-200",
+      "border dark:border-neutral-800 bg-gray-50 text-gray-800 dark:bg-neutral-900 dark:text-gray-200",
     indigo:
-      "rounded-full border border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300",
+      "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300",
   };
 
   return (
-    <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-xs font-medium ${toneCls[tone]}`}>
-      {prefix ? <span className="opacity-70">{prefix}:</span> : null}
-      <span className="font-semibold">{v}</span>
+    <span
+      className={`inline-flex items-center text-xs px-2 py-1 rounded-lg leading-tight align-middle shrink-0 ${toneCls[tone] || toneCls.neutral}`}
+    >      {prefix ? <span className="opacity-80 mr-1">{prefix}:</span> : null}
+      <b>{v}</b>
     </span>
-
   );
 }
 
@@ -768,43 +871,6 @@ function requiredToLabel(v: any): "Mandatory" | "Optional" | "—" {
   return "—";
 }
 
-function splitCodeTitle(raw?: string | null): { code?: string; title?: string } {
-  const s = (raw || "").trim();
-  if (!s) return {};
-  const parts = s.split(":");
-  if (parts.length > 1) {
-    return { code: parts[0].trim(), title: parts.slice(1).join(":").trim() || undefined };
-  }
-  return { title: s };
-}
-
-function inferTags(it: any): string[] {
-  // Accept common shapes: array, comma/pipe-separated strings, generic 'labels'
-  const out: string[] = [];
-  const candidates: any[] = [
-    it?.tags,
-    it?.tag,
-    it?.labels,
-    it?.label,
-    it?.tagsCsv,
-    it?.labelsCsv,
-  ].filter((x) => x != null);
-
-  for (const c of candidates) {
-    if (Array.isArray(c)) {
-      for (const t of c) {
-        const s = (t ?? "").toString().trim();
-        if (s) out.push(s);
-      }
-    } else if (typeof c === "string") {
-      const parts = c.split(/[,\|]/g).map((z) => z.trim()).filter(Boolean);
-      out.push(...parts);
-    }
-  }
-  // Deduplicate
-  return Array.from(new Set(out)).slice(0, 10);
-}
-
 export type WirHistoryRow = {
   sNo: number;
   id: string;
@@ -816,8 +882,26 @@ export type WirHistoryRow = {
   notes?: string | null;
 };
 
+// --- Discussion types (aligned with Prisma WirDiscussion) ---
+type DiscussionMsg = {
+  id: string;
+  wirId: string;
+  authorId: string;
+  authorName?: string | null;
+  notes: string;         // UI-friendly name, maps from backend `body`
+  createdAt: string;
+  fileUrl?: string | null;   // optional attachment URL
+  fileName?: string | null;  // optional attachment display name
+};
+
+type DiscussionPayload = {
+  authorId: string;
+  notes: string;
+  file?: File | null;        // optional file; currently ignored by backend
+};
+
 async function fetchWirHistory(pid: string, wid: string): Promise<WirHistoryRow[]> {
-  const { data } = await api.get(`/projects/${pid}/wir/${wid}/history`);
+  const data = await apiGetWirHistory(pid, wid);
   const rows: WirHistoryRow[] = (Array.isArray(data) ? data : []).map((r: any) => ({
     sNo: Number(r.sNo ?? 0),
     id: String(r.id ?? ""),
@@ -902,9 +986,335 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   const [runnerLoading, setRunnerLoading] = useState(false);
   const [runnerError, setRunnerError] = useState<string | null>(null);
 
-  //GPS verification for BIC + Inspector
-  const [gpsVerified, setGpsVerified] = useState(false);
+  // local, controlled edit buffers for the tiles
+  const [runnerInspectorEdits, setRunnerInspectorEdits] = useState<Record<string, {
+    status: 'PASS' | 'FAIL' | null;
+    measurement: string | null;
+    remark: string | null;
+  }>>({});
 
+  const [runnerHodEdits, setRunnerHodEdits] = useState<Record<string, {
+    hodRemark: string | null;
+  }>>({});
+
+  // === [Runner_1] === Types and Constants
+  // Inspector tile local state (per checklist item in Runner)
+  type InspectorRunnerState = {
+    status: "PASS" | "FAIL" | null;
+    measurement: string;
+    remark: string;
+    photos: File[];
+  };
+
+  // === [Runner_2] === State: inspectorState, inspectorRecommendation
+  const [inspectorState, setInspectorState] = useState<
+    Record<string, InspectorRunnerState>
+  >({});
+
+  // HOD tile local state (per checklist item in Runner)
+  type HodRunnerState = {
+    remark: string;
+    lastSavedAt?: string;
+  };
+
+  const [hodState, setHodState] = useState<Record<string, HodRunnerState>>({});
+
+  const getHodState = (itemId: string): HodRunnerState => {
+    return (
+      hodState[itemId] || {
+        remark: "",
+        lastSavedAt: undefined,
+      }
+    );
+  };
+
+
+  const updateHodState = (itemId: string, patch: Partial<HodRunnerState>) => {
+    setHodState((prev) => {
+      const current: HodRunnerState =
+        prev[itemId] || {
+          remark: "",
+          lastSavedAt: undefined,
+        };
+      return {
+        ...prev,
+        [itemId]: { ...current, ...patch },
+      };
+    });
+  };
+
+  const handleHodRemarkChange =
+    (itemId: string) =>
+      (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+        updateHodState(itemId, { remark: e.target.value });
+      };
+
+  const handleHodSave = (itemId: string) => async () => {
+    if (!selected) return;
+
+    const st = getHodState(itemId);
+    const trimmed = (st.remark || "").trim();
+    if (!trimmed) {
+      alert("Please add a HOD remark before saving.");
+      return;
+    }
+
+    // Find the runner row and get its WIR row id (wid)
+    const row = runnerItems.find((r) => String(r.id) === String(itemId)) || null;
+    const wid = row?.wid ? String(row.wid) : null;
+
+    if (!wid) {
+      // No WIR row yet => cannot save against this item
+      alert(
+        "This checklist item is not yet part of the WIR (no WIR row id). " +
+        "Ask the Contractor/Inspector to open Runner and Save once so rows are created, then try again."
+      );
+      return;
+    }
+
+    const ts = new Date().toISOString();
+    updateHodState(itemId, { lastSavedAt: ts });
+
+    // Send ONLY itemId = wid (DB id)
+    const payload: any = {
+      items: [
+        {
+          itemId: wid,
+          hodRemark: trimmed,  // keep `hodRemark`; most DTOs accept this
+          remark: trimmed,     // extra compatibility (harmless duplicate)
+        },
+      ],
+    };
+
+    try {
+      await saveWirRunnerHod(projectId, selected.wirId, payload);
+      alert("HOD remark saved.");
+    } catch (e: any) {
+      const data = e?.response?.data;
+      const msg = Array.isArray(data?.message)
+        ? data.message.join("\n")
+        : data?.message || data?.error || e?.message || "Failed to save HOD remark";
+      console.error("[WIR] HOD save failed", { status: e?.response?.status, data, payload });
+      alert(msg);
+    }
+    console.log("[SAVE] HOD remark save triggered", {
+      user: user,
+      projectId,
+      wirId: selected?.wirId,
+      itemId,
+    });
+  };
+
+  type InspectorRecommendationChoice =
+    | "APPROVE"
+    | "APPROVE_WITH_COMMENTS"
+    | "REJECT";
+
+  const OVERALL_REC_KEY = "__overall__"; // Overall Inspector recommendation
+
+  const [inspectorRecommendation, setInspectorRecommendation] = useState<
+    Record<string, InspectorRecommendationChoice | null>
+  >({});
+
+  const [inspectorSaving, setInspectorSaving] = useState(false);
+
+
+  // Label helper for inspector recommendation (overall)
+  const inspectorRecLabel = (
+    choice: InspectorRecommendationChoice | null
+  ): string => {
+    if (!choice) return "Not yet given";
+    if (choice === "APPROVE") return "Approve";
+    if (choice === "APPROVE_WITH_COMMENTS") return "Approve with Comments";
+    if (choice === "REJECT") return "Reject";
+    return "Not yet given";
+  };
+
+  type InspectorSavePayload = {
+    items: {
+      itemId: string;
+      status: "PASS" | "FAIL" | null;
+      measurement: string | null;
+      remark: string | null;
+    }[];
+    overallRecommendation?: "APPROVE" | "APPROVE_WITH_COMMENTS" | "REJECT" | null;
+  };
+
+  // === [Runner_4] === Function: persistInspectorData()
+  // Actually sends payload to backend
+  const persistInspectorData = async (mode: "save" | "preview" | "sendToHod") => {
+    if (!projectId || !selected) {
+      alert("Project / WIR context missing; cannot save Inspector data.");
+      return;
+    }
+    const raw = {
+      items: (
+        (selected?.runnerInspector?.items || [])
+          .map((ri) => {
+            const st = inspectorState[ri.itemId] || {};
+            const measurement =
+              typeof st.measurement === "number"
+                ? String(st.measurement)
+                : (st.measurement || "").trim();
+            const remark = (st.remark || "").trim();
+            const status = st.status ?? null;
+
+            const hasAny =
+              Boolean(measurement) || Boolean(remark) || status !== null;
+            if (!hasAny) return undefined;
+
+            return {
+              itemId: ri.itemId as string,
+              status,
+              measurement: measurement || null,
+              remark: remark || null,
+            };
+          })
+          .filter((x): x is {
+            itemId: string;
+            status: "PASS" | "FAIL" | null;
+            measurement: string | null;
+            remark: string | null;
+          } => Boolean(x))
+      ),
+      overallRecommendation:
+        inspectorRecommendation[OVERALL_REC_KEY] ?? null,
+    };
+
+    try {
+      setInspectorSaving(true);
+      console.log("[SAVE] Inspector payload to backend:", {
+        wirId: selected?.wirId,
+        raw,
+      });
+      await saveWirRunnerInspector(projectId, selected.wirId, raw);
+      log("Inspector runner saved", { wirId: selected.wirId, mode, raw });
+
+      if (mode === "save") {
+        alert("Inspector data saved.");
+      } else if (mode === "preview") {
+        alert("Inspector data saved. Preview can use this saved data.");
+      } else if (mode === "sendToHod") {
+        alert("Inspector data saved and marked ready for HOD.");
+      }
+    } catch (e: any) {
+      // ---- Precise error reporting ----
+      const resp = e?.response;
+      const data = resp?.data;
+
+      // Common NestJS error shapes:
+      // { statusCode, message: string|string[], error }
+      // or your service might return { error: "...", details: {...} }
+      let msg = "Failed to save Inspector data";
+      if (Array.isArray(data?.message)) {
+        msg = data.message.join("\n");
+      } else if (typeof data?.message === "string") {
+        msg = data.message;
+      } else if (typeof data?.error === "string") {
+        msg = data.error;
+      } else if (typeof e?.message === "string") {
+        msg = e.message;
+      }
+
+      alert(msg);
+
+      // Log full context for dev console
+      console.error("[WIR] Inspector runner save failed", {
+        status: resp?.status,
+        statusText: resp?.statusText,
+        url: resp?.config?.url,
+        raw,
+        data
+      });
+    } finally {
+      setInspectorSaving(false);
+    }
+    console.log("[SAVE] Logged-in user info:", role);
+    console.log("[SAVE] Role (inspector/hod?) should influence view/save logic");
+  };
+
+  // Overall HOD finalize modal state
+  type HodOutcome = "ACCEPT" | "RETURN" | "REJECT";
+
+  const [hodFinalizeOpen, setHodFinalizeOpen] = useState(false);
+  const [hodOutcome, setHodOutcome] = useState<HodOutcome | null>(null);
+  const [hodNotesText, setHodNotesText] = useState("");
+
+  const getInspectorRecommendation = (
+    itemId: string
+  ): InspectorRecommendationChoice | null => {
+    return inspectorRecommendation[itemId] ?? null;
+  };
+
+  const updateInspectorRecommendation = (
+    itemId: string,
+    value: InspectorRecommendationChoice | null
+  ) => {
+    setInspectorRecommendation((prev) => ({
+      ...prev,
+      [itemId]: value,
+    }));
+  };
+
+  const getInspectorState = (itemId: string): InspectorRunnerState => {
+    return (
+      inspectorState[itemId] || {
+        status: null,
+        measurement: "",
+        remark: "",
+        photos: [],
+      }
+    );
+  };
+
+  const updateInspectorState = (
+    itemId: string,
+    patch: Partial<InspectorRunnerState>
+  ) => {
+    setInspectorState((prev) => {
+      const current = prev[itemId] || {
+        status: null as "PASS" | "FAIL" | null,
+        measurement: "",
+        remark: "",
+        photos: [] as File[],
+      };
+      return {
+        ...prev,
+        [itemId]: { ...current, ...patch },
+      };
+    });
+  };
+
+  const handleInspectorPhotoChange =
+    (itemId: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      const current = getInspectorState(itemId);
+      updateInspectorState(itemId, {
+        photos: [...current.photos, ...files],
+      });
+    };
+
+  const handleInspectorMark =
+    (itemId: string, status: "PASS" | "FAIL") =>
+      () => {
+        const current = getInspectorState(itemId);
+        // Clicking again will toggle off
+        const nextStatus = current.status === status ? null : status;
+        updateInspectorState(itemId, { status: nextStatus });
+      };
+
+  const handleInspectorRemarkChange =
+    (itemId: string) =>
+      (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+        updateInspectorState(itemId, { remark: e.target.value });
+      };
+
+  const handleInspectorMeasurementChange =
+    (itemId: string) =>
+      (e: React.ChangeEvent<HTMLInputElement>) => {
+        updateInspectorState(itemId, { measurement: e.target.value });
+      };
 
   // fetch "transmission type" from Module Settings (project row or module default)
   async function fetchTransmissionType(pid: string): Promise<string | null> {
@@ -1067,6 +1477,15 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   const [roTab, setRoTab] = useState<'document' | 'discussion'>('document');
   const [docTab, setDocTab] = useState<'overview' | 'runner'>('overview');
 
+  const [discMsgs, setDiscMsgs] = useState<DiscussionMsg[]>([]);
+  const [discLoading, setDiscLoading] = useState(false);
+  const [discError, setDiscError] = useState<string | null>(null);
+  const [userNameById, setUserNameById] = useState<Record<string, string>>({});
+
+  // composer
+  const [discText, setDiscText] = useState("");
+  const [discFile, setDiscFile] = useState<File | null>(null); // either file OR camera photo
+
   type ViewMode = "create" | "edit" | "readonly";
   const [mode, setMode] = useState<ViewMode>("create");
   const isRO = mode === "readonly";
@@ -1159,14 +1578,14 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       const contractorId = String(authorIdRaw || currentUserId || getUserIdFromToken() || "");
 
       // C) Persist all participants on the draft BEFORE submit
-      await api.patch(`/projects/${projectId}/wir/${dispatchWirId}`, {
+      await apiUpdateWir(projectId, dispatchWirId, {
         inspectorId: dispatchPick,
         hodId: hodId || null,           // ← assign HOD irrespective of pick
         contractorId: contractorId || null // ← assign contractor = author
       });
 
       // D) Submit (status → Submitted; server sets BIC)
-      await api.post(`/projects/${projectId}/wir/${dispatchWirId}/submit`, { role: "Contractor" });
+      await apiSubmitWir(projectId, dispatchWirId, { role: "Contractor" });
 
       // E) Optimistic UI for BIC chip
       if (candidate) {
@@ -1194,6 +1613,55 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
     }
   }
 
+  async function onDiscussionSend() {
+    if (!selected) return;
+    const authorId = currentUserId || getUserIdFromToken();
+    const notes = (discText || "").trim();
+
+    if (!authorId) {
+      alert("No userId found in token. Please re-login.");
+      return;
+    }
+    if (!notes && !discFile) {
+      alert("Write a note or attach a file.");
+      return;
+    }
+
+    // optimistic placeholder
+    const tempId = `temp-${Date.now()}`;
+    const optimistic: DiscussionMsg = {
+      id: tempId,
+      wirId: selected.wirId,
+      authorId: String(authorId),
+      authorName: null,
+      notes,
+      fileUrl: null,
+      createdAt: new Date().toISOString(),
+    };
+    setDiscMsgs((prev) => [optimistic, ...prev]);
+
+    try {
+      const saved = await postDiscussion(projectId, selected.wirId, {
+        notes,
+        authorId: String(authorId),
+        file: discFile,
+      });
+
+      // swap optimistic with saved
+      setDiscMsgs((prev) =>
+        prev.map((m) => (m.id === tempId ? saved : m))
+      );
+      setDiscText("");
+      setDiscFile(null);
+    } catch (e: any) {
+      // rollback optimistic
+      setDiscMsgs((prev) => prev.filter((m) => m.id !== tempId));
+      const s = e?.response?.status;
+      const msg = e?.response?.data?.error || e?.message || "Failed to send comment";
+      alert(`Error ${s ?? ""} ${msg}`);
+    }
+  }
+
   function openDispatchModal(wirId: string, onDateISO: string) {
     setDispatchWirId(wirId);
     setDispatchPick(null);
@@ -1218,10 +1686,17 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   const hasMA = newForm.materialApprovalFiles.length > 0;
   const hasSafety = newForm.safetyClearanceFiles.length > 0;
 
+  // === [Runner_6] === Selector: selected WIR from list
   const selected = useMemo(
     () => state.list.find((w) => String(w.wirId) === String(selectedId)) || null,
     [state.list, selectedId]
   );
+
+  console.log("[FETCH] Loaded WIR runner data:", {
+    wirId: selected?.wirId,
+    runnerInspector: selected?.runnerInspector,
+    inspectorItems: selected?.runnerInspector?.items,
+  });
 
   const checklistLabelById = useMemo(() => {
     const map = new Map<string, string>();
@@ -1290,7 +1765,20 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   };
 
   const loadWir = async (pid: string, wid: string) => {
-    const { data } = await api.get(`/projects/${pid}/wir/${wid}`);
+    const data = await apiGetWir(pid, wid);
+
+    //  Injected auto-initialize logic
+    if ((data?.items?.length ?? 0) === 0) {
+      const checklistId = data?.checklistId ?? data?.meta?.checklistId;
+      if (checklistId) {
+        log("Runner: No rows found, auto-initializing...");
+        await api.post(`/projects/${pid}/wir/${wid}/runner/initialize`, {
+          checklistId,
+        });
+        const updated = await apiGetWir(pid, wid); // re-fetch after init
+        return updated;
+      }
+    }
     return data;
   };
 
@@ -1325,7 +1813,7 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
     const run = async () => {
       setState((s) => ({ ...s, loading: true, error: null }));
       try {
-        const { data } = await api.get(`/projects/${projectId}/wir`);
+        const data = await apiListWir(projectId);
 
         const arr: any[] = Array.isArray(data)
           ? data
@@ -1396,9 +1884,10 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
             ),
         }));
 
-        if (!cancelled) setState({ list, loading: false, error: null });
-        setState({ list, loading: false, error: null });
-        warmChecklistCounts(list);
+        if (!cancelled) {
+          setState({ list, loading: false, error: null });
+          warmChecklistCounts(list);
+        }
       } catch (e: any) {
         if (!cancelled)
           setState({
@@ -1604,7 +2093,7 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
     if (!window.confirm("Delete this WIR permanently? This cannot be undone.")) return;
 
     try {
-      await api.delete(`/projects/${projectId}/wir/${id}`);
+      await apiDeleteWir(projectId, id);
       // Optimistic UI: remove from list
       setState((s) => ({
         ...s,
@@ -1647,14 +2136,14 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
 
     try {
       if (r === "PMC" || r === "IH-PMT" || r === "Consultant") {
-        await api.post(`/projects/${projectId}/wir/${selected.wirId}/recommend`, { role: r });
+        await apiRecommendWir(projectId, selected.wirId, { role: r });
         await reloadWirList();
         alert("Recommended.");
         goToList(true);
         return;
       }
       if (r === "Admin" || r === "Client") {
-        await api.post(`/projects/${projectId}/wir/${selected.wirId}/approve`, { role: r });
+        await apiApproveWir(projectId, selected.wirId, { role: r });
         await reloadWirList();
         alert("Approved.");
         goToList(true);
@@ -1673,9 +2162,12 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       setSelectedId(id);
       const row = state.list.find((w) => String(w.wirId) === String(id));
       let status = row?.status || "Draft";
-      const full = await loadWirListIfNeededAndGet(id);
+      const full = await loadWir(projectId, id);  // ensures auto-initialize + fresh
       status = full?.status || status;
       setNewForm(mapWirToForm(full || {}));
+
+      // NEW: hydrate runner tiles now (Inspector/HOD)
+      hydrateRunnerFrom(full);
       if (!checklists.rows.length && !checklists.loading) loadChecklists();
 
       const statusLower = (status || "").toLowerCase();
@@ -1709,6 +2201,7 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   const loadWirListIfNeededAndGet = async (id: string) => {
     try {
       const full = await loadWir(projectId, id);
+      hydrateRunnerFrom(full);     // NEW: hydrate immediately
       return full;
     } catch {
       if (!state.list.length) await reloadWirList();
@@ -1768,10 +2261,16 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
     };
   };
 
+  // === [Runner_5] === WIR List Fetch: reloadWirList()
+  // Loads list of WIRs into state.list → used to derive selected
   const reloadWirList = async () => {
-    const { data } = await api.get(`/projects/${projectId}/wir`);
+    const data = await apiListWir(projectId);
 
-    const arr: any[] = Array.isArray(data) ? data : Array.isArray(data?.records) ? data.records : [];
+    const arr: any[] = Array.isArray(data)
+      ? data
+      : Array.isArray((data as any)?.records)
+        ? (data as any).records
+        : [];
     const list: WirRecord[] = arr.map((x) => ({
       wirId: x.wirId ?? x.id,
       code: x.code ?? x.irCode ?? null,
@@ -1811,6 +2310,7 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
         x.createdById ??
         x.author?.userId ??
         null,
+
       items: (x.items || []).map((it: any, i: number) => ({
         id: it.id ?? `it-${i}`,
         name: it.name ?? it.title ?? `Item ${i + 1}`,
@@ -1821,6 +2321,11 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
           it.photoCount ?? (Array.isArray(it.photos) ? it.photos.length : null),
         status: it.status ?? null,
       })),
+
+      // 🔽 NEW: carry runner inspector / HOD blobs from backend
+      runnerInspector: (x as any).runnerInspector ?? null,
+      runnerHod: (x as any).runnerHod ?? null,
+
       description: x.description ?? x.notes ?? null,
       updatedAt: x.updatedAt ?? x.modifiedAt ?? x.createdAt ?? null,
 
@@ -1834,6 +2339,10 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
             String(h?.action || "").toLowerCase().includes("resched")
           ))
         ),
+      // === [Runner_FE_Discard_Bug]: runnerInspector/runnerHod not being passed here
+      // 🔴 You MUST add:
+      // runnerInspector: x.runnerInspector ?? null,
+      // runnerHod: x.runnerHod ?? null,
     }));
 
     setState({ list, loading: false, error: null });
@@ -1857,14 +2366,14 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       const body = buildWirPayload();
 
       if (!selectedId) {
-        await api.post(`/projects/${projectId}/wir`, body);
+        await apiCreateWir(projectId, body);
         alert("Draft created.");
         resetNewForm();
         goToList(true);
         return;
       }
 
-      await api.patch(`/projects/${projectId}/wir/${selectedId}`, body);
+      await apiUpdateWir(projectId, selectedId, body);
       alert("Draft updated.");
       resetNewForm();
       goToList(true);
@@ -1901,8 +2410,8 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       // Ensure a WIR exists (create draft if needed)
       let id = selectedId;
       if (!id) {
-        const { data } = await api.post(`/projects/${projectId}/wir`, buildWirPayload());
-        id = String(data?.wirId || data?.id);
+        const created = await apiCreateWir(projectId, buildWirPayload());
+        id = String(created?.wirId || created?.id);
         setSelectedId(id || null);
       }
       if (!id) throw new Error("Could not determine WIR ID to submit.");
@@ -2094,95 +2603,241 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   }, [clLibOpen]);
 
   useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && hodFinalizeOpen) {
+        setHodFinalizeOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hodFinalizeOpen]);
+
+  useEffect(() => {
     if (clLibOpen) {
       loadChecklists();
     }
   }, [newForm.discipline, clLibOpen]);
-  // --- Gate: check Inspector/HOD eligibility for Runner (top-level effect, not nested) ---
-  useEffect(() => {
-    let cancelled = false;
 
-    // Reset when panel closed or no selection
-    if (!roViewOpen || !selected) {
-      setRunnerGateChecked(false);
-      setRunnerAllowed(false);
-      setRunnerGateReason(null);
-      return;
+  // === [Runner_HYDRATE] === Centralized hydrator for Inspector/HOD local state
+  function hydrateRunnerFrom(full: any) {
+    if (!full) return;
+
+    const allRows: Array<{ id: string; wid?: string | null; cid?: string | null }> =
+      Array.isArray(full.items)
+        ? full.items.map((wi: any) => ({
+          id: String(wi?.id ?? wi?.checklistItemId ?? ""),
+          wid: wi?.id ? String(wi.id) : null,
+          cid: wi?.checklistItemId ? String(wi.checklistItemId) : null,
+        }))
+        : [];
+
+    // ---- Inspector ----
+    const inspItems: any[] = Array.isArray(full.runnerInspector?.items)
+      ? full.runnerInspector.items
+      : [];
+
+    setInspectorState(prev => {
+      const next: any = { ...prev };
+      for (const row of allRows) {
+        const hit = inspItems.find((x: any) => {
+          const xWid = x?.itemId != null ? String(x.itemId) : null;
+          const xCid = x?.checklistItemId != null ? String(x.checklistItemId) : null;
+          return (xWid && (xWid === row.id || xWid === row.wid)) || (xCid && xCid === row.cid);
+        });
+        if (hit) {
+          next[row.id] = {
+            status: hit.status ?? null,
+            measurement: hit.measurement ?? "",
+            remark: hit.remark ?? "",
+            photos: [],
+          };
+        }
+      }
+      return next;
+    });
+
+    const overall = full.runnerInspector?.overallRecommendation ?? null;
+    if (overall) {
+      setInspectorRecommendation({ [OVERALL_REC_KEY]: overall });
     }
 
-    (async () => {
-      setRunnerGateChecked(false);
-      try {
-        const res = await checkRunnerGate();
-        if (cancelled) return;
-        setRunnerAllowed(res.allowed);
-        setRunnerGateReason(res.reason || null);
-        setRunnerGateChecked(true);
+    // ---- HOD ----
+    const hodItems: any[] = Array.isArray(full.runnerHod?.items)
+      ? full.runnerHod.items
+      : [];
 
-        // If user is on Runner but not allowed, push them back to Overview
-        if (docTab === "runner" && !res.allowed) {
-          setDocTab("overview");
+    setHodState(prev => {
+      const next: any = { ...prev };
+      for (const row of allRows) {
+        const hit = hodItems.find((x: any) => {
+          const xWid = x?.itemId != null ? String(x.itemId) : null;
+          return xWid === row.wid || xWid === row.id;
+        });
+        if (hit) {
+          next[row.id] = {
+            hodRemark: hit.hodRemark ?? hit.remark ?? "",
+            lastSavedAt: hit.hodLastSavedAt ?? undefined,
+          };
         }
-      } catch (e: any) {
-        if (cancelled) return;
-        setRunnerAllowed(false);
-        setRunnerGateReason(e?.message || "Could not verify your Inspector/HOD eligibility.");
-        setRunnerGateChecked(true);
       }
-    })();
+      return next;
+    });
+  }
 
-    return () => {
-      cancelled = true;
-    };
-    // docTab included so we can bounce back if the gate closes while on Runner
-  }, [roViewOpen, selected?.wirId, selected?.forDate, projectId, currentUserId, docTab]);
-
-  // --- Load Runner checklist items when the Runner tab is actually open ---
+  // === [Runner_Load_1] === Runner Panel: useEffect to hydrate runner items
   useEffect(() => {
     if (!selected || !roViewOpen || roTab !== "document" || docTab !== "runner") {
-      setRunnerItems([]);
-      setRunnerError(null);
-      setRunnerLoading(false);
-      return;
-    }
-
-    const ids = extractChecklistIds(selected);
-    if (!ids.length) {
-      setRunnerItems([]);
-      setRunnerError(null);
-      setRunnerLoading(false);
+      log("Runner effect: skip", {
+        hasSelected: !!selected,
+        roViewOpen,
+        roTab,
+        docTab,
+      });
       return;
     }
 
     let cancelled = false;
+
     (async () => {
       setRunnerLoading(true);
       setRunnerError(null);
+
       try {
-        const all: RunnerCardItem[] = [];
-        for (const id of ids) {
-          const rows: RefChecklistItem[] = await listRefChecklistItems(id);
-          for (let i = 0; i < rows.length; i++) {
-            const r = rows[i];
-            all.push({
-              id: String(r.id ?? `${id}.${i}`),
-              title: String(r.title ?? r.name ?? `Item ${i + 1}`),
+        // ✅ Always fetch fresh WIR (auto-initializes if needed)
+        const wir = await getWir(projectId, selected.wirId);
+        const wirItemsArr: any[] = Array.isArray(wir.items) ? wir.items : [];
+
+        // Map for quick lookup
+        const byWid = new Map<string, any>();
+        const byCid = new Map<string, any>();
+        for (const wi of wirItemsArr) {
+          const wid = wi?.id ? String(wi.id) : null;
+          const cid = wi?.checklistItemId ? String(wi.checklistItemId) : null;
+          if (wid) byWid.set(wid, wi);
+          if (cid) byCid.set(cid, wi);
+        }
+
+        // === Load ref checklist rows
+        const checklistIds = extractChecklistIds(wir);
+        const refItems: any[] = [];
+        for (const clId of checklistIds) {
+          const rows = await listRefChecklistItems(clId);
+          const arr: any[] = Array.isArray(rows)
+            ? rows
+            : Array.isArray((rows as any)?.items)
+              ? (rows as any).items
+              : Array.isArray((rows as any)?.records)
+                ? (rows as any).records
+                : [];
+
+
+          for (const r of arr) {
+            refItems.push({
+              cid: String(r.id ?? r.itemId ?? r.code ?? r.slug ?? ""),
+              title: r.title ?? r.name ?? r.label ?? "Item",
               code: r.code ?? null,
-              unit: r.unit ?? (r as any).uom ?? null,
-              tolerance: r.tolerance ?? (r as any).specification ?? (r as any).spec ?? null,
-              required: (r as any).required ?? (r as any).mandatory,
-              critical: (r as any).critical === true ? true : false,
-              status: (r as any).status ?? null,
-              tags: Array.isArray((r as any).tags) ? (r as any).tags.slice(0, 10) : [],
+              unit: r.unit ?? r.uom ?? null,
+              tolerance: r.tolerance ?? formatTolerance?.(r) ?? null,
+              required: r.required ?? r.requirement ?? r.mandatory ?? null,
+              requirement: r.requirement ?? null,
+              critical: r.critical === true,
               base: numOrNull((r as any).base),
               plus: numOrNull((r as any).plus),
               minus: numOrNull((r as any).minus),
+              tags: Array.isArray(r.tags) ? r.tags.slice(0, 10) : [],
             });
           }
         }
-        if (!cancelled) setRunnerItems(all);
-      } catch (e: any) {
-        if (!cancelled) setRunnerError(e?.message || "Failed to load checklist items");
+
+        // === Merge checklist + WIR items
+        const all: RunnerCardItem[] = refItems.map((ri, i) => {
+          const wi = byCid.get(ri.cid) || null;
+          const wid = wi?.id ? String(wi.id) : null;
+          const status = wi?.status ?? null;
+
+          return {
+            id: wid || ri.cid,
+            wid,
+            cid: ri.cid,
+            title: String(ri.title ?? `Item ${i + 1}`),
+            code: ri.code,
+            unit: ri.unit,
+            tolerance: ri.tolerance,
+            required: ri.required,
+            requirement: ri.requirement,
+            critical: ri.critical ?? null,
+            status,
+            tags: ri.tags ?? [],
+            base: ri.base ?? null,
+            plus: ri.plus ?? null,
+            minus: ri.minus ?? null,
+          };
+        });
+
+        setRunnerItems(all);
+
+        // === Hydrate Inspector Panel
+        if (!cancelled) {
+          const inspItems = Array.isArray(wir.runnerInspector?.items) ? wir.runnerInspector.items : [];
+
+          const inspectorMatches = all.filter(row =>
+            inspItems.some((x: any) => {
+              const xWid = x?.itemId != null ? String(x.itemId) : null;
+              const xCid = x?.checklistItemId != null ? String(x.checklistItemId) : null;
+              return (xWid && (xWid === row.id || xWid === row.wid)) || (xCid && xCid === row.cid);
+            })
+          );
+          console.log("[WIR] Inspector hydrated rows:", inspectorMatches.length, "of", all.length);
+
+          setInspectorState((prev) => {
+            const next: any = { ...prev };
+            for (const row of all) {
+              const hit = inspItems.find((x: any) => {
+                const xWid = x?.itemId != null ? String(x.itemId) : null;
+                const xCid = x?.checklistItemId != null ? String(x.checklistItemId) : null;
+                return (xWid && (xWid === row.id || xWid === row.wid)) || (xCid && xCid === row.cid);
+              });
+
+              if (hit) {
+                next[row.id] = {
+                  status: hit.status ?? null,
+                  measurement: hit.measurement ?? "",
+                  remark: hit.remark ?? "",
+                  photos: [],
+                };
+              }
+            }
+            return next;
+          });
+
+          const overall = wir.runnerInspector?.overallRecommendation;
+          if (overall) {
+            setInspectorRecommendation({ [OVERALL_REC_KEY]: overall });
+          }
+        }
+
+        // === Hydrate HOD Panel
+        if (!cancelled) {
+          const hodItems = Array.isArray(wir.runnerHod?.items) ? wir.runnerHod.items : [];
+
+          setHodState((prev) => {
+            const next: any = { ...prev };
+            for (const row of all) {
+              const hit = hodItems.find((x: any) =>
+                String(x?.itemId ?? "") === row.wid || String(x?.itemId ?? "") === row.id
+              );
+              if (hit) {
+                next[row.id] = {
+                  hodRemark: hit.hodRemark ?? hit.remark ?? "",
+                  lastSavedAt: hit.hodLastSavedAt ?? undefined,
+                };
+              }
+            }
+            return next;
+          });
+        }
+      } catch (err: any) {
+        if (!cancelled) setRunnerError(err?.message || "Failed to load runner items");
       } finally {
         if (!cancelled) setRunnerLoading(false);
       }
@@ -2192,7 +2847,6 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       cancelled = true;
     };
   }, [selected?.wirId, roViewOpen, roTab, docTab]);
-
 
   useEffect(() => {
     if (!selected || !roViewOpen || roTab !== "document" || docTab !== "overview") return;
@@ -2250,6 +2904,59 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
     };
   }, [selected?.wirId, roViewOpen, roTab, docTab]);
 
+  useEffect(() => {
+    if (!selected || !roViewOpen || roTab !== "discussion") return;
+
+    let cancelled = false;
+    (async () => {
+      setDiscLoading(true);
+      setDiscError(null);
+      try {
+        const rows = await fetchDiscussion(projectId, selected.wirId);
+        if (!cancelled) setDiscMsgs(rows);
+      } catch (e: any) {
+        if (!cancelled) {
+          setDiscMsgs([]);
+          setDiscError(e?.response?.data?.error || e?.message || "Failed to load discussion");
+        }
+      } finally {
+        if (!cancelled) setDiscLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, selected?.wirId, roViewOpen, roTab]);
+
+  // Load all users once when Discussion tab is opened, so we can show full names for old messages
+  useEffect(() => {
+    if (!roViewOpen || roTab !== "discussion") return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get("/admin/users");
+        const users: UserLite[] = Array.isArray(data) ? data : (data?.users ?? []);
+        if (cancelled) return;
+
+        const map: Record<string, string> = {};
+        for (const u of users) {
+          map[String(u.userId)] = displayNameLite(u);
+        }
+        setUserNameById(map);
+      } catch {
+        if (!cancelled) {
+          setUserNameById({});
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [roViewOpen, roTab]);
+
   /* ======== Custom Time Picker UI state ======== */
   const [timePickerOpen, setTimePickerOpen] = useState(false);
   const [tpHour, setTpHour] = useState(12);
@@ -2258,63 +2965,6 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   const [ovStats, setOvStats] = useState<{ total: number; mandatory: number; critical: number } | null>(null);
   const [ovLoading, setOvLoading] = useState(false);
   const [ovError, setOvError] = useState<string | null>(null);
-  /** Runner access gate: only Inspector / HOD (or Inspector+HOD) can view Runner */
-  const [runnerGateChecked, setRunnerGateChecked] = useState(false);
-  const [runnerAllowed, setRunnerAllowed] = useState(false);
-  const [runnerGateReason, setRunnerGateReason] = useState<string | null>(null);
-
-  function normalizeName(s?: string | null) {
-    return (s || "").toString().trim().replace(/\s+/g, " ").toLowerCase();
-  }
-
-  // Best-effort current user's display name (to match BIC's display string)
-  const meDisplayName = useMemo(() => {
-    const u = (user as any) || {};
-    const name = [u.firstName, u.middleName, u.lastName].filter(Boolean).join(" ").trim();
-    return normalizeName(name || u.fullName || u.name || u.email || "");
-  }, [user]);
-
-  // BIC must be me (string match; backend gives bicName as a display string)
-  const runnerBicIsMe = useMemo(() => {
-    const bic = normalizeName(selected?.bicName || "");
-    const me = meDisplayName;
-    if (!bic || !me) return false;
-    // Loose match to tolerate middle-name/spacing variations
-    return bic === me || bic.includes(me) || me.includes(bic);
-  }, [selected?.bicName, meDisplayName]);
-
-  //** A small helper to check if current user is Inspector/HOD for the IR date */
-  async function checkRunnerGate(): Promise<{ allowed: boolean; reason?: string }> {
-    try {
-      // Identify the relevant date for the WIR (fallback to today)
-      const dateISO =
-        (selected?.forDate && String(selected.forDate).slice(0, 10)) || newForm.dateISO || todayISO();
-
-      // Resolve acting PMC roles for that date
-      const acting = await resolvePmcActingRolesForProjectOnDate(projectId, dateISO);
-      const me = String(currentUserId || getUserIdFromToken() || "");
-
-      // Allowed if current user appears as Inspector/HOD/Inspector+HOD
-      const mine = acting.find(
-        (a) =>
-          String(a?.user?.userId || "") === me &&
-          (a.role === "Inspector" || a.role === "HOD" || a.role === "Inspector+HOD")
-      );
-
-      if (mine) return { allowed: true };
-      return {
-        allowed: false,
-        reason:
-          "Runner is restricted to the assigned Inspector or HOD for the IR date. You are not eligible for this section.",
-      };
-    } catch (e: any) {
-      return {
-        allowed: false,
-        reason: e?.message || "Could not verify your Inspector/HOD eligibility.",
-      };
-    }
-  }
-
 
   const openTimePicker = () => {
     if (isRO) return;
@@ -2346,7 +2996,7 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
 
   // Lock page scroll whenever any layered modal is open
   const anyModalOpen =
-    roViewOpen || dispatchOpen || clLibOpen || resOpen || filledOpen || histOpen;
+    roViewOpen || dispatchOpen || clLibOpen || resOpen || filledOpen || histOpen || hodFinalizeOpen;
 
   useScrollLock(anyModalOpen);
 
@@ -2413,7 +3063,7 @@ ${styleEls}
     }
     setResSaving(true);
     try {
-      await api.post(`/projects/${projectId}/wir/${selected.wirId}/reschedule`, {
+      await apiRescheduleWir(projectId, selected.wirId, {
         role,                         // optional, for server audit
         currentDateISO: resCurDate,
         currentTime12h: resCurTime,
@@ -2434,6 +3084,55 @@ ${styleEls}
       setResSaving(false);
     }
   };
+
+  // Overall Inspector recommendation text for HOD tile
+  const overallInspectorRec = inspectorRecLabel(
+    inspectorRecommendation[OVERALL_REC_KEY] ?? null
+  );
+  // HOD finalize modal labels
+  const hodModalWirTitle = useMemo(() => {
+    if (!selected) return "";
+    const code = selected.code ? `${selected.code} — ` : "";
+    return code + (selected.title || "Inspection Request");
+  }, [selected]);
+
+  const hodModalInspectorName = selected?.inspectorName || "—";
+  const hodModalRecommendation = overallInspectorRec || "Not yet given";
+
+  const openHodFinalizeModal = () => {
+    if (!selected) return;
+    setHodOutcome(null);
+    setHodNotesText("");
+    setHodFinalizeOpen(true);
+  };
+
+  const handleHodOutcomeClick =
+    (v: HodOutcome) => () => {
+      setHodOutcome(v);
+    };
+
+  const handleHodFinalizeConfirm = () => {
+    if (!selected) return;
+    if (!hodOutcome) {
+      alert("Please select an outcome (Accept / Return / Reject).");
+      return;
+    }
+
+    // ⬇️ Keep behaviour non-breaking for now: just log + close.
+    // Wire actual API here later when backend is ready.
+    log("HOD Finalize submitted", {
+      wirId: selected.wirId,
+      wirCode: selected.code,
+      wirTitle: selected.title,
+      inspectorName: hodModalInspectorName,
+      inspectorRecommendation: inspectorRecommendation[OVERALL_REC_KEY] ?? null,
+      outcome: hodOutcome,
+      notes: hodNotesText,
+    });
+
+    setHodFinalizeOpen(false);
+  };
+
   /* ========================= Render ========================= */
   return (
     <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4 sm:p-5 md:p-6">
@@ -3277,8 +3976,7 @@ ${styleEls}
               <div className="text-base sm:text-lg font-semibold dark:text-white">Filter WIRs</div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 pt-4 pb-2 space-y-4">
-              {/* Status pills */}
+            <div className="flex-1 overflow-y-auto px-4 pt-4 pb-2 space-y-4">              {/* Status pills */}
               <div>
                 <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">Status</div>
                 <div className="flex flex-wrap gap-1.5">
@@ -3387,6 +4085,146 @@ ${styleEls}
         </div>
       )}
 
+      {hodFinalizeOpen && selected && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setHodFinalizeOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-lg bg-white dark:bg-neutral-900 rounded-2xl border dark:border-neutral-800 shadow-2xl p-4 sm:p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold dark:text-white">
+                  Finalize HOD Recommendation
+                </div>
+                <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  Review Inspector recommendation and select final outcome.
+                </div>
+              </div>
+              <button
+                onClick={() => setHodFinalizeOpen(false)}
+                aria-label="Close"
+                className="rounded-full border dark:border-neutral-700 bg-white/90 dark:bg-neutral-900/90 p-1.5 text-xs"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Info rows */}
+            <div className="space-y-2 text-sm">
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  WIR
+                </div>
+                <div className="mt-0.5 font-medium dark:text-white">
+                  {hodModalWirTitle}
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    Inspector
+                  </div>
+                  <div className="mt-0.5 dark:text-white">
+                    {hodModalInspectorName}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    Recommendation
+                  </div>
+                  <div className="mt-0.5 dark:text-white">
+                    {hodModalRecommendation}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Select Outcome */}
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1.5">
+                Select Outcome
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleHodOutcomeClick("ACCEPT")}
+                  className={
+                    "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 " +
+                    (hodOutcome === "ACCEPT"
+                      ? "bg-emerald-600 text-white border-emerald-600"
+                      : "hover:bg-gray-50 dark:hover:bg-neutral-800 dark:text-white")
+                  }
+                >
+                  Accept
+                </button>
+                <button
+                  type="button"
+                  onClick={handleHodOutcomeClick("RETURN")}
+                  className={
+                    "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 " +
+                    (hodOutcome === "RETURN"
+                      ? "bg-amber-600 text-white border-amber-600"
+                      : "hover:bg-gray-50 dark:hover:bg-neutral-800 dark:text-white")
+                  }
+                >
+                  Return
+                </button>
+                <button
+                  type="button"
+                  onClick={handleHodOutcomeClick("REJECT")}
+                  className={
+                    "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 " +
+                    (hodOutcome === "REJECT"
+                      ? "bg-rose-600 text-white border-rose-600"
+                      : "hover:bg-gray-50 dark:hover:bg-neutral-800 dark:text-white")
+                  }
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+
+            {/* Notes input */}
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                Notes
+              </div>
+              <input
+                type="text"
+                value={hodNotesText}
+                onChange={(e) => setHodNotesText(e.target.value)}
+                placeholder="Add notes for your final decision (optional)…"
+                className="w-full text-sm border rounded-lg px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+              />
+            </div>
+
+            {/* Footer actions */}
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t dark:border-neutral-800">
+              <button
+                type="button"
+                onClick={() => setHodFinalizeOpen(false)}
+                className="text-sm px-3 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleHodFinalizeConfirm}
+                className="text-sm px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white"
+              >
+                Finalize Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ===== Read-only View Modal for Submitted/Locked WIR ===== */}
       {roViewOpen && selected && (
         <div
@@ -3455,43 +4293,31 @@ ${styleEls}
                 })}
               </div>
 
-              {/* Document Sub-Tabs — Overview / Runner (only show when Document is active) */}
+              {/* NEW: Document Sub-Tabs — Overview / Runner (only show when Document is active) */}
               {roTab === 'document' && (
                 <div className="mt-2 flex items-center gap-1">
                   {[
-                    { k: 'overview' as const, label: 'Overview', locked: false },
-                    { k: 'runner' as const, label: 'Runner', locked: !runnerAllowed },
+                    { k: 'overview' as const, label: 'Overview' },
+                    { k: 'runner' as const, label: 'Runner' },
                   ].map(t => {
                     const on = docTab === t.k;
-                    const disabled = t.locked;
-                    const baseCls =
-                      "px-2.5 py-1 rounded-md text-xs border transition " +
-                      (on
-                        ? "bg-indigo-600 text-white border-indigo-600"
-                        : "bg-white dark:bg-neutral-900 dark:text-white dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800");
-
                     return (
                       <button
                         key={t.k}
-                        onClick={() => {
-                          if (disabled) return; // gate
-                          setDocTab(t.k);
-                        }}
-                        disabled={disabled}
-                        title={t.k === 'runner' && disabled ? (runnerGateReason || "Runner is restricted to Inspector/HOD") : ""}
+                        onClick={() => setDocTab(t.k)}
                         className={
-                          baseCls +
-                          (disabled ? " opacity-60 cursor-not-allowed" : "")
+                          "px-2.5 py-1 rounded-md text-xs border transition " +
+                          (on
+                            ? "bg-indigo-600 text-white border-indigo-600"
+                            : "bg-white dark:bg-neutral-900 dark:text-white dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800")
                         }
                       >
                         {t.label}
-                        {t.k === 'runner' && disabled ? " 🔒" : null}
                       </button>
                     );
                   })}
                 </div>
               )}
-
             </div>
 
 
@@ -3551,76 +4377,19 @@ ${styleEls}
                     </>
                   )}
 
-                  {docTab === "runner" && (
+                  {docTab === 'runner' && (
                     <SectionCard title={`Runner · Checklist Items (${runnerItems.length})`}>
-                      {(() => {
-                        // Determine BIC == me (loose match)
-                        const myName =
-                          [user?.firstName, user?.middleName, user?.lastName].filter(Boolean).join(" ").trim() ||
-                          (claims as any)?.name ||
-                          (user as any)?.email ||
-                          "";
-                        const isBIC =
-                          (selected?.bicName || "").toString().trim().toLowerCase() === myName.toLowerCase();
-
-                        const isRunnerEligible = runnerAllowed && isBIC;
-
-                        if (!isRunnerEligible) {
-                          return (
-                            <div className="text-sm text-gray-700 dark:text-gray-300">
-                              Runner is restricted to the assigned Inspector/HOD for the IR date, with BIC set to you.
-                              {(runnerGateReason || selected?.bicName) ? (
-                                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-                                  {runnerGateReason ? `Reason: ${runnerGateReason}` : null}
-                                  {selected?.bicName ? ` · Current BIC: ${selected.bicName}` : null}
-                                </div>
-                              ) : null}
-                            </div>
-                          );
-                        }
-
-                        if (!gpsVerified) {
-                          return (
-                            <div className="space-y-3">
-                              <div className="text-sm font-medium dark:text-white">On-site Verification (GPS required)</div>
-                              <div className="text-sm text-gray-700 dark:text-gray-300">
-                                Verify you are at the work location before accessing the Runner checklist and recommendation tools.
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  className="px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-sm"
-                                  onClick={() => {
-                                    alert("GPS verified at 25.2048, 55.2708.");
-                                    setGpsVerified(true);
-                                  }}
-                                >
-                                  Verify GPS
-                                </button>
-                                <button
-                                  type="button"
-                                  className="px-3 py-2 rounded border dark:border-neutral-800 text-sm hover:bg-gray-50 dark:hover:bg-neutral-800"
-                                  onClick={() => setDocTab("overview")}
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                              <div className="text-xs text-gray-600 dark:text-gray-400">
-                                Once verified, checklist actions and AI analysis will unlock.
-                              </div>
-                            </div>
-                          );
-                        }
-
-                        if (runnerLoading) return <div className="text-sm text-gray-700 dark:text-gray-300">Loading…</div>;
-                        if (runnerError) return <div className="text-sm text-rose-700 dark:text-rose-400">{runnerError}</div>;
-                        if (!runnerItems.length)
-                          return <div className="text-sm text-gray-700 dark:text-gray-300">No checklist items found for this WIR.</div>;
-
-                        const activityTitle = (newForm.activityLabel || selected?.title || "Activity").toString();
-                        const activityCode = (selected?.code || "").toString();
-
-                        return (
+                      {runnerLoading ? (
+                        <div className="text-sm text-gray-700 dark:text-gray-300">Loading…</div>
+                      ) : runnerError ? (
+                        <div className="text-sm text-rose-700 dark:text-rose-400">{runnerError}</div>
+                      ) : runnerItems.length === 0 ? (
+                        <div className="text-sm text-gray-700 dark:text-gray-300">
+                          No checklist items found for this WIR.
+                        </div>
+                      ) : (
+                        <>
+                          {/* All checklist items + Inspector tiles */}
                           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                             {runnerItems.map((it, i) => {
                               const tolStr =
@@ -3632,29 +4401,45 @@ ${styleEls}
                                   it.unit || null
                                 ) || (it.tolerance ? String(it.tolerance) : "");
 
+                              const activityTitle =
+                                (newForm.activityLabel || selected?.title || "Activity").toString();
+                              const activityCode = (selected?.code || "").toString();
                               const reqLabel = requiredToLabel(it.required);
+
+                              const inspector = getInspectorState(it.id);
+                              const passOn = inspector.status === "PASS";
+                              const failOn = inspector.status === "FAIL";
+                              const photoCount = inspector.photos.length;
+                              const hod = getHodState(it.id);
 
                               return (
                                 <div
                                   key={it.id || `runner-${i}`}
                                   className="rounded-xl border dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 shadow-sm"
                                 >
+                                  {/* Heading: Title — Tol */}
                                   <div className="text-sm font-semibold dark:text-white break-words">
                                     {it.title}
                                     {tolStr ? <span className="opacity-70"> — {tolStr}</span> : null}
                                   </div>
 
+                                  {/* Meta: Activity Title • Activity Code */}
                                   <div className="mt-0.5">
                                     <DotSep left={activityTitle} right={activityCode || "—"} />
                                   </div>
 
+                                  {/* Pills */}
                                   <div className="mt-2 flex items-center gap-1.5 flex-wrap">
                                     <SoftPill label={reqLabel} />
+                                    {it.critical ? <SoftPill label="Critical" tone="danger" /> : null}
                                     <SoftPill label="Unit" value={it.unit || ""} />
                                     <SoftPill label="Tol" value={tolStr} tone="info" />
-                                    {it.status ? <SoftPill label="Status" value={String(it.status)} /> : null}
+                                    {it.status ? (
+                                      <SoftPill label="Status" value={String(it.status)} />
+                                    ) : null}
                                   </div>
 
+                                  {/* Tags */}
                                   <div className="mt-2">
                                     {it.tags && it.tags.length ? (
                                       <div className="flex items-center gap-1.5 flex-wrap">
@@ -3668,58 +4453,404 @@ ${styleEls}
                                         ))}
                                       </div>
                                     ) : (
-                                      <div className="text-[11px] text-gray-500 dark:text-gray-400">No tags</div>
+                                      <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                                        No tags
+                                      </div>
                                     )}
+                                  </div>
+
+                                  {/* ===== Tile - Inspector (per checklist item) ===== */}
+                                  <div className="mt-3 pt-3 border-t dark:border-neutral-800">
+                                    <div className="flex items-center justify-between gap-2 mb-2">
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+                                        Inspector
+                                      </div>
+                                      {inspector.status && (
+                                        <span className="text-[11px] px-2 py-0.5 rounded-full border border-emerald-500 text-emerald-700 dark:border-emerald-400 dark:text-emerald-300">
+                                          Marked: {inspector.status}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Row: Add Photo + PASS / FAIL buttons */}
+                                    <div className="flex flex-wrap items-center gap-2 mb-2">
+                                      {/* Add Photo */}
+                                      <label className="inline-flex items-center text-xs px-2 py-1 rounded border dark:border-neutral-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800">
+                                        <input
+                                          type="file"
+                                          accept="image/*"
+                                          capture="environment"      // 👈 ask mobile to open back camera
+                                          // capture="user"          // (optional) front camera instead
+                                          className="hidden"
+                                          multiple={false}           // camera + multiple often not supported together
+                                          onChange={handleInspectorPhotoChange(it.id)}
+                                        />
+                                        <span className="mr-1">📷</span>
+                                        <span>Take Photo</span>
+                                      </label>
+
+                                      {photoCount > 0 && (
+                                        <span className="text-[11px] px-2 py-0.5 rounded-full border dark:border-neutral-800">
+                                          {photoCount} photo{photoCount === 1 ? "" : "s"} attached
+                                        </span>
+                                      )}
+
+                                      <div className="flex items-center gap-1 ml-auto">
+                                        <button
+                                          type="button"
+                                          onClick={handleInspectorMark(it.id, "PASS")}
+                                          className={
+                                            "text-xs px-2 py-1 rounded border dark:border-neutral-800 transition " +
+                                            (passOn
+                                              ? "bg-emerald-600 text-white border-emerald-600"
+                                              : "hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                          }
+                                        >
+                                          Mark PASS
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={handleInspectorMark(it.id, "FAIL")}
+                                          className={
+                                            "text-xs px-2 py-1 rounded border dark:border-neutral-800 transition " +
+                                            (failOn
+                                              ? "bg-rose-600 text-white border-rose-600"
+                                              : "hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                          }
+                                        >
+                                          Mark FAIL
+                                        </button>
+                                      </div>
+                                    </div>
+                                    {/* Measurement input */}
+                                    <div className="mb-2">
+                                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                                        Measurement
+                                      </div>
+                                      <input
+                                        type="text"
+                                        className="w-full text-xs border rounded-lg px-2 py-1 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+                                        placeholder="Enter measurement (e.g., 19.8 mm/m)…"
+                                        value={inspector.measurement}
+                                        onChange={handleInspectorMeasurementChange(it.id)}
+                                      />
+                                    </div>
+                                    {/* Remark input */}
+                                    <div>
+                                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                                        Inspector Remark
+                                      </div>
+                                      <textarea
+                                        rows={2}
+                                        className="w-full text-xs border rounded-lg px-2 py-1 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+                                        placeholder="Write brief observation / measurement notes…"
+                                        value={inspector.remark}
+                                        onChange={handleInspectorRemarkChange(it.id)}
+                                      />
+                                    </div>
+                                  </div>
+                                  {/* ===== Tile - HOD (per checklist item) ===== */}
+                                  <div className="mt-3 pt-3 border-t dark:border-neutral-800">
+                                    <div className="flex items-center justify-between gap-2 mb-2">
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+                                        HOD
+                                      </div>
+                                      {hod.lastSavedAt && (
+                                        <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                                          Saved at {fmtDateTime(hod.lastSavedAt)}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Inspector remark (read-only) */}
+                                    <div className="mb-2">
+                                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                                        Inspector Remark (read-only)
+                                      </div>
+                                      <div className="text-xs px-2 py-1 rounded-lg border dark:border-neutral-800 bg-gray-50 dark:bg-neutral-800 dark:text-gray-100 min-h-[2.25rem] whitespace-pre-wrap">
+                                        {(inspector.remark || "").trim() || "—"}
+                                      </div>
+                                    </div>
+
+                                    {/* HOD remark input */}
+                                    <div className="mb-2">
+                                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                                        HOD Remark
+                                      </div>
+                                      <textarea
+                                        rows={2}
+                                        className="w-full text-xs border rounded-lg px-2 py-1 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+                                        placeholder="HOD comments / final decision…"
+                                        value={hod.remark}
+                                        onChange={handleHodRemarkChange(it.id)}
+                                      />
+                                    </div>
+
+                                    {/* Save button */}
+                                    <div className="flex items-center justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={handleHodSave(it.id)}
+                                        className="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-700 text-white"
+                                      >
+                                        Save
+                                      </button>
+                                    </div>
                                   </div>
                                 </div>
                               );
                             })}
                           </div>
-                        );
-                      })()}
+
+                          {/* ===== Tile - Inspector Recommendation (for all items) ===== */}
+                          <div className="mt-4 pt-4 border-t dark:border-neutral-800">
+                            <div className="flex items-center justify-between gap-2 mb-2">
+                              <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+                                Inspector Recommendation
+                              </div>
+                            </div>
+
+                            {(() => {
+                              const rec = getInspectorRecommendation(OVERALL_REC_KEY);
+
+                              const onClickChoice = (choice: InspectorRecommendationChoice) => () => {
+                                const current = getInspectorRecommendation(OVERALL_REC_KEY);
+                                updateInspectorRecommendation(
+                                  OVERALL_REC_KEY,
+                                  current === choice ? null : choice
+                                );
+                              };
+
+                              const approveOn = rec === "APPROVE";
+                              const approveWithCommentsOn = rec === "APPROVE_WITH_COMMENTS";
+                              const rejectOn = rec === "REJECT";
+
+                              return (
+                                <>
+                                  {/* Pills row */}
+                                  <div className="flex flex-wrap items-center gap-2 mb-2">
+                                    <button
+                                      type="button"
+                                      onClick={onClickChoice("APPROVE")}
+                                      className={
+                                        "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 transition " +
+                                        (approveOn
+                                          ? "bg-emerald-600 text-white border-emerald-600"
+                                          : "bg-white dark:bg-neutral-900 hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                      }
+                                    >
+                                      Approve
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={onClickChoice("APPROVE_WITH_COMMENTS")}
+                                      className={
+                                        "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 transition " +
+                                        (approveWithCommentsOn
+                                          ? "bg-indigo-600 text-white border-indigo-600"
+                                          : "bg-white dark:bg-neutral-900 hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                      }
+                                    >
+                                      Approve with Comments
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={onClickChoice("REJECT")}
+                                      className={
+                                        "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 transition " +
+                                        (rejectOn
+                                          ? "bg-rose-600 text-white border-rose-600"
+                                          : "bg-white dark:bg-neutral-900 hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                      }
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+
+                                  <div className="text-[11px] text-gray-600 dark:text-gray-400">
+                                    We will add relevant comment according to the approval status.
+                                  </div>
+                                  {/* Action buttons: Save Progress / Preview / Send to HOD */}
+                                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => persistInspectorData("save")}
+                                      disabled={inspectorSaving}
+                                      className="text-xs px-3 py-1.5 rounded-md border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    >
+                                      {inspectorSaving ? "Saving…" : "Save Progress"}
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => persistInspectorData("preview")}
+                                      disabled={inspectorSaving}
+                                      className="text-xs px-3 py-1.5 rounded-md border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    >
+                                      Preview
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => persistInspectorData("sendToHod")}
+                                      disabled={inspectorSaving}
+                                      className="text-xs px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    >
+                                      Send to HOD
+                                    </button>
+                                  </div>
+                                </>
+                              );
+                            })()}
+                          </div>
+                          {/* Tile - HOD Recommendation (overall) */}
+                          <div className="mt-4 rounded-xl border dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 sm:p-4">
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+                                  HOD Recommendation
+                                </div>
+                                <div className="mt-1 text-sm text-gray-800 dark:text-gray-100">
+                                  <span className="font-medium">Inspector recommendation:&nbsp;</span>
+                                  <span className="text-gray-700 dark:text-gray-200">
+                                    {overallInspectorRec || "Not yet provided"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={openHodFinalizeModal}
+                                className="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white"
+                              >
+                                Finalize Now
+                              </button>
+
+                            </div>
+                          </div>
+
+                        </>
+                      )}
                     </SectionCard>
                   )}
-
-
                 </>
               )}
 
               {/* DISCUSSION TAB */}
-              {roTab === 'discussion' && (
+              {roTab === 'discussion' && selected && (
                 <>
-                  <SectionCard title="Thread">
-                    <div className="space-y-3">
-                      {/* Placeholder messages */}
-                      <div className="text-sm">
-                        <div className="font-medium dark:text-white">Inspector</div>
-                        <div className="text-gray-700 dark:text-gray-300">Please upload ITP for footing F2.</div>
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">Today 10:32 AM</div>
-                      </div>
-                      <div className="text-sm">
-                        <div className="font-medium dark:text-white">Contractor</div>
-                        <div className="text-gray-700 dark:text-gray-300">Shared in Documents & Evidence.</div>
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">Today 11:05 AM</div>
-                      </div>
-                    </div>
-                  </SectionCard>
-
+                  {/* COMMENT SECTION FIRST */}
                   <SectionCard title="Add a comment">
-                    <div className="flex items-start gap-2">
+                    <div className="flex flex-col gap-2">
                       <textarea
                         rows={3}
                         placeholder="Write a message to the project team…"
                         className="w-full text-sm border rounded-lg px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+                        value={discText}
+                        onChange={(e) => setDiscText(e.target.value)}
                       />
-                      <button
-                        className="shrink-0 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-sm"
-                      // onClick={postComment} // wire later
-                      >
-                        Send
-                      </button>
+
+                      {/* Attach: file OR camera photo */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* File picker */}
+                        <label className="text-xs px-2 py-1 rounded border dark:border-neutral-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800">
+                          <input
+                            type="file"
+                            className="hidden"
+                            onChange={(e) => setDiscFile(e.target.files?.[0] ?? null)}
+                          />
+                          📎 Attach file
+                        </label>
+
+                        {/* Camera capture (mobile-friendly) */}
+                        <label className="text-xs px-2 py-1 rounded border dark:border-neutral-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800">
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden"
+                            onChange={(e) => setDiscFile(e.target.files?.[0] ?? null)}
+                          />
+                          📷 Take photo
+                        </label>
+
+                        {/* Show picked file name */}
+                        {discFile && (
+                          <span className="text-[11px] px-2 py-0.5 rounded-full border dark:border-neutral-800">
+                            {discFile.name}
+                          </span>
+                        )}
+
+                        <div className="grow" />
+
+                        <button
+                          onClick={onDiscussionSend}
+                          className="shrink-0 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-sm"
+                        >
+                          Send
+                        </button>
+                      </div>
+                    </div>
+                  </SectionCard>
+
+                  {/* THREAD BELOW COMMENT BOX */}
+                  <SectionCard title="Thread">
+                    {discLoading && (
+                      <div className="text-sm text-gray-700 dark:text-gray-300">Loading…</div>
+                    )}
+                    {discError && !discLoading && (
+                      <div className="text-sm text-rose-700 dark:text-rose-400">
+                        {discError}
+                      </div>
+                    )}
+                    {!discLoading && !discError && discMsgs.length === 0 && (
+                      <div className="text-sm text-gray-700 dark:text-gray-300">
+                        No messages yet.
+                      </div>
+                    )}
+
+                    <div className="mt-2 space-y-3">
+                      {discMsgs.map((m) => {
+                        const who =
+                          (m.authorName && m.authorName.trim()) ||
+                          userNameById[m.authorId] ||
+                          `User #${m.authorId}`;
+                        return (
+                          <div
+                            key={m.id}
+                            className="text-sm rounded-lg border dark:border-neutral-800 p-3 bg-white dark:bg-neutral-900"
+                          >
+                            <div className="font-medium dark:text-white break-words">
+                              {who}
+                            </div>
+                            {m.notes && (
+                              <div className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words mt-0.5">
+                                {m.notes}
+                              </div>
+                            )}
+                            {m.fileUrl && (
+                              <div className="mt-2">
+                                <a
+                                  href={m.fileUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-xs underline text-emerald-700 dark:text-emerald-300"
+                                >
+                                  {m.fileName || "View attachment"}
+                                </a>
+                              </div>
+                            )}
+                            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
+                              {fmtDateTime(m.createdAt)}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </SectionCard>
                 </>
               )}
+
             </div>
 
             {/* Footer (sticky) */}

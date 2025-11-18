@@ -496,8 +496,10 @@ type WIRProps = {
 type WirItem = {
   id: string;
   name: string;
+  checklistId?: string | null;
   spec?: string | null;
   required?: string | null;
+  critical?: boolean | number | string | null;
   tolerance?: string | null;
   photoCount?: number | null;
   status?: string | null;
@@ -533,7 +535,8 @@ type WirRecord = {
   items?: WirItem[];
   description?: string | null;
   updatedAt?: string | null;
-
+  /** Canonical list of ref-checklist IDs attached to this WIR */
+  selectedChecklistIds?: string[];
   wasRescheduled?: boolean;     // derived boolean
   lastRescheduledAt?: string | null; // optional display/tooltip
 };
@@ -606,25 +609,171 @@ async function apiGetSafe<T = any>(
   }
 }
 
+async function fetchDiscussion(
+  pid: string,
+  wid: string
+): Promise<DiscussionMsg[]> {
+  const { data } = await api.get(`/projects/${pid}/wir/${wid}/discussions`);
+
+  // Support plain array or wrapped { items / rows }
+  const arr: any[] = Array.isArray(data)
+    ? data
+    : data?.items || data?.rows || [];
+
+  const msgs: DiscussionMsg[] = arr.map((r: any) => {
+    const createdAt =
+      r.createdAt || r.created_at || r.created_on || new Date().toISOString();
+
+    // Try to resolve authorName from denormalized field or related `author`
+    const authorName =
+      r.authorName ??
+      (r.author
+        ? `${r.author.firstName ?? ""} ${r.author.lastName ?? ""}`.trim() ||
+        undefined
+        : undefined);
+
+    // ---- ATTACHMENTS MAPPING (robust to different backend shapes) ----
+    let fileUrl: string | null =
+      r.fileUrl ??
+      r.fileURL ??
+      r.attachmentUrl ??
+      r.attachmentURL ??
+      null;
+
+    let fileName: string | null =
+      r.fileName ??
+      r.filename ??
+      r.attachmentName ??
+      r.attachmentFilename ??
+      null;
+
+    // If not flat fields, try array/object forms like { attachments: [...] } or { files: [...] }
+    if (!fileUrl) {
+      const filesArr: any[] = Array.isArray(r.attachments)
+        ? r.attachments
+        : Array.isArray(r.files)
+          ? r.files
+          : [];
+
+      if (filesArr.length > 0) {
+        const f = filesArr[0] || {};
+        fileUrl =
+          f.url ??
+          f.downloadUrl ??
+          f.href ??
+          f.fileUrl ??
+          null;
+        fileName =
+          fileName ??
+          f.name ??
+          f.fileName ??
+          f.filename ??
+          null;
+      }
+    }
+
+    return {
+      id: String(r.id ?? ""),
+      wirId: String(r.wirId ?? wid),
+      authorId: String(r.authorId ?? ""),
+      authorName,
+      // use `body` as the actual message text, with fallbacks
+      notes: String(
+        r.body ?? // Prisma column
+        r.notes ?? // in case controller renamed it
+        r.message ??
+        ""
+      ),
+      createdAt: String(createdAt),
+      fileUrl: fileUrl || undefined,
+      fileName: fileName || undefined,
+    };
+  });
+
+  // Oldest first (if you want latest first, reverse this sort)
+  msgs.sort(
+    (a, b) =>
+      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+
+  return msgs;
+}
+
+/** POST comment + optional file.
+ *  NOTE: backend currently accepts JSON body only; payload.file is ignored for now.
+ */
+async function postDiscussion(
+  pid: string,
+  wid: string,
+  payload: DiscussionPayload
+): Promise<DiscussionMsg> {
+  const { data } = await api.post(`/projects/${pid}/wir/${wid}/discussions`, {
+    // send both, so whatever your DTO expects will be populated
+    body: payload.notes,   // matches Prisma column
+    notes: payload.notes,  // in case controller uses `notes`
+    authorId: payload.authorId,
+  });
+
+  const createdAt =
+    data?.createdAt || data?.created_at || data?.created_on || new Date().toISOString();
+
+  const authorName =
+    data?.authorName ??
+    (data?.author
+      ? `${data.author.firstName ?? ""} ${data.author.lastName ?? ""}`.trim() ||
+      undefined
+      : undefined);
+
+  const fileUrl =
+    data?.fileUrl ??
+    data?.attachmentUrl ??
+    null;
+
+  const fileName =
+    data?.fileName ??
+    data?.attachmentName ??
+    null;
+
+  return {
+    id: String(data?.id ?? data?.commentId ?? crypto.randomUUID()),
+    wirId: String(wid),
+    authorId: String(data?.authorId ?? payload.authorId),
+    authorName,
+    notes: String(
+      data?.body ??       // Prisma column
+      data?.notes ??    // if controller remaps to notes
+      data?.message ??  // older shapes
+      payload.notes
+    ),
+    createdAt: String(createdAt),
+    fileUrl,
+    fileName,
+  };
+}
+
 // --- Checklist items-count cache ---
 type ChecklistCountMap = Record<string, number>;
 
-function extractChecklistIds(w: WirRecord): string[] {
-  const raw = w.items || [];
-  // Accept: {name:id}, {code:id}, {checklistId:id}, or raw string in name/title
-  const ids = raw.map((it: any) => {
-    const c1 = it?.checklistId ?? it?.name ?? it?.code ?? it?.id ?? it?.title;
-    return c1 != null ? String(c1).trim() : "";
-  }).filter(Boolean);
+function extractChecklistIds(w: Partial<WirRecord> & any): string[] {
+  // Prefer explicit arrays from server if present
+  const explicit =
+    (Array.isArray(w.selectedChecklistIds) && w.selectedChecklistIds) ||
+    (Array.isArray(w.refChecklistIds) && w.refChecklistIds) ||
+    (Array.isArray(w.checklistIds) && w.checklistIds) ||
+    [];
 
-  // If server ever sends a 'selectedChecklistIds' array, merge that too (defensive).
-  const extra = Array.isArray((w as any)?.selectedChecklistIds)
-    ? (w as any).selectedChecklistIds.map((z: any) => String(z).trim()).filter(Boolean)
+  if (explicit.length) {
+    return Array.from(new Set(explicit.map((z: any) => String(z).trim()).filter(Boolean)));
+  }
+
+  // Last resort: only trust items[].checklistId (never name/code/title)
+  const fromItems = Array.isArray(w.items)
+    ? w.items
+      .map((it: any) => (it?.checklistId != null ? String(it.checklistId).trim() : ""))
+      .filter(Boolean)
     : [];
-
-  return Array.from(new Set([...ids, ...extra]));
+  return Array.from(new Set(fromItems));
 }
-
 /* ========================= UI Atoms ========================= */
 /** KPI-style pill (value-only, bold) */
 /** KPI-style pill (value-only, bold; optional label prefix for BIC) */
@@ -813,6 +962,24 @@ export type WirHistoryRow = {
   notes?: string | null;
 };
 
+// --- Discussion types (aligned with Prisma WirDiscussion) ---
+type DiscussionMsg = {
+  id: string;
+  wirId: string;
+  authorId: string;
+  authorName?: string | null;
+  notes: string;         // UI-friendly name, maps from backend `body`
+  createdAt: string;
+  fileUrl?: string | null;   // optional attachment URL
+  fileName?: string | null;  // optional attachment display name
+};
+
+type DiscussionPayload = {
+  authorId: string;
+  notes: string;
+  file?: File | null;        // optional file; currently ignored by backend
+};
+
 async function fetchWirHistory(pid: string, wid: string): Promise<WirHistoryRow[]> {
   const { data } = await api.get(`/projects/${pid}/wir/${wid}/history`);
   const rows: WirHistoryRow[] = (Array.isArray(data) ? data : []).map((r: any) => ({
@@ -898,6 +1065,180 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   const [runnerItems, setRunnerItems] = useState<RunnerCardItem[]>([]);
   const [runnerLoading, setRunnerLoading] = useState(false);
   const [runnerError, setRunnerError] = useState<string | null>(null);
+
+  // Inspector tile local state (per checklist item in Runner)
+  type InspectorRunnerState = {
+    status: "PASS" | "FAIL" | null;
+    measurement: string;
+    remark: string;
+    photos: File[];
+  };
+
+  const [inspectorState, setInspectorState] = useState<
+    Record<string, InspectorRunnerState>
+  >({});
+
+  // HOD tile local state (per checklist item in Runner)
+  type HodRunnerState = {
+    remark: string;
+    lastSavedAt?: string;
+  };
+
+  const [hodState, setHodState] = useState<Record<string, HodRunnerState>>({});
+
+  const getHodState = (itemId: string): HodRunnerState => {
+    return (
+      hodState[itemId] || {
+        remark: "",
+        lastSavedAt: undefined,
+      }
+    );
+  };
+
+  const updateHodState = (itemId: string, patch: Partial<HodRunnerState>) => {
+    setHodState((prev) => {
+      const current: HodRunnerState =
+        prev[itemId] || {
+          remark: "",
+          lastSavedAt: undefined,
+        };
+      return {
+        ...prev,
+        [itemId]: { ...current, ...patch },
+      };
+    });
+  };
+
+  const handleHodRemarkChange =
+    (itemId: string) =>
+      (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+        updateHodState(itemId, { remark: e.target.value });
+      };
+
+  const handleHodSave = (itemId: string) => () => {
+    const st = getHodState(itemId);
+    const trimmed = (st.remark || "").trim();
+    if (!trimmed) {
+      alert("Please add a HOD remark before saving.");
+      return;
+    }
+
+    const ts = new Date().toISOString();
+    updateHodState(itemId, { lastSavedAt: ts });
+
+    // 🔜 TODO: Wire this to backend when HOD API is ready
+    log("HOD remark saved (frontend-only stub)", {
+      wirId: selected?.wirId,
+      itemId,
+      remark: trimmed,
+      at: ts,
+    });
+  };
+
+  type InspectorRecommendationChoice =
+    | "APPROVE"
+    | "APPROVE_WITH_COMMENTS"
+    | "REJECT";
+
+  const OVERALL_REC_KEY = "__overall__"; // Overall Inspector recommendation
+
+  const [inspectorRecommendation, setInspectorRecommendation] = useState<
+    Record<string, InspectorRecommendationChoice | null>
+  >({});
+
+  // Label helper for inspector recommendation (overall)
+  const inspectorRecLabel = (
+    choice: InspectorRecommendationChoice | null
+  ): string => {
+    if (!choice) return "Not yet given";
+    if (choice === "APPROVE") return "Approve";
+    if (choice === "APPROVE_WITH_COMMENTS") return "Approve with Comments";
+    if (choice === "REJECT") return "Reject";
+    return "Not yet given";
+  };
+
+  // Overall HOD finalize modal state
+  type HodOutcome = "ACCEPT" | "RETURN" | "REJECT";
+
+  const [hodFinalizeOpen, setHodFinalizeOpen] = useState(false);
+  const [hodOutcome, setHodOutcome] = useState<HodOutcome | null>(null);
+  const [hodNotesText, setHodNotesText] = useState("");
+
+  const getInspectorRecommendation = (
+    itemId: string
+  ): InspectorRecommendationChoice | null => {
+    return inspectorRecommendation[itemId] ?? null;
+  };
+
+  const updateInspectorRecommendation = (
+    itemId: string,
+    value: InspectorRecommendationChoice | null
+  ) => {
+    setInspectorRecommendation((prev) => ({
+      ...prev,
+      [itemId]: value,
+    }));
+  };
+
+  const getInspectorState = (itemId: string): InspectorRunnerState => {
+    return (
+      inspectorState[itemId] || {
+        status: null,
+        measurement: "",
+        remark: "",
+        photos: [],
+      }
+    );
+  };
+
+  const updateInspectorState = (
+    itemId: string,
+    patch: Partial<InspectorRunnerState>
+  ) => {
+    setInspectorState((prev) => {
+      const current = prev[itemId] || {
+        status: null as "PASS" | "FAIL" | null,
+        measurement: "",
+        remark: "",
+        photos: [] as File[],
+      };
+      return {
+        ...prev,
+        [itemId]: { ...current, ...patch },
+      };
+    });
+  };
+
+  const handleInspectorPhotoChange =
+    (itemId: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      const current = getInspectorState(itemId);
+      updateInspectorState(itemId, {
+        photos: [...current.photos, ...files],
+      });
+    };
+
+  const handleInspectorMark =
+    (itemId: string, status: "PASS" | "FAIL") =>
+      () => {
+        const current = getInspectorState(itemId);
+        // Clicking again will toggle off
+        const nextStatus = current.status === status ? null : status;
+        updateInspectorState(itemId, { status: nextStatus });
+      };
+
+  const handleInspectorRemarkChange =
+    (itemId: string) =>
+      (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+        updateInspectorState(itemId, { remark: e.target.value });
+      };
+
+  const handleInspectorMeasurementChange =
+    (itemId: string) =>
+      (e: React.ChangeEvent<HTMLInputElement>) => {
+        updateInspectorState(itemId, { measurement: e.target.value });
+      };
 
   // fetch "transmission type" from Module Settings (project row or module default)
   async function fetchTransmissionType(pid: string): Promise<string | null> {
@@ -1060,6 +1401,15 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   const [roTab, setRoTab] = useState<'document' | 'discussion'>('document');
   const [docTab, setDocTab] = useState<'overview' | 'runner'>('overview');
 
+  const [discMsgs, setDiscMsgs] = useState<DiscussionMsg[]>([]);
+  const [discLoading, setDiscLoading] = useState(false);
+  const [discError, setDiscError] = useState<string | null>(null);
+  const [userNameById, setUserNameById] = useState<Record<string, string>>({});
+
+  // composer
+  const [discText, setDiscText] = useState("");
+  const [discFile, setDiscFile] = useState<File | null>(null); // either file OR camera photo
+
   type ViewMode = "create" | "edit" | "readonly";
   const [mode, setMode] = useState<ViewMode>("create");
   const isRO = mode === "readonly";
@@ -1187,6 +1537,55 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
     }
   }
 
+  async function onDiscussionSend() {
+    if (!selected) return;
+    const authorId = currentUserId || getUserIdFromToken();
+    const notes = (discText || "").trim();
+
+    if (!authorId) {
+      alert("No userId found in token. Please re-login.");
+      return;
+    }
+    if (!notes && !discFile) {
+      alert("Write a note or attach a file.");
+      return;
+    }
+
+    // optimistic placeholder
+    const tempId = `temp-${Date.now()}`;
+    const optimistic: DiscussionMsg = {
+      id: tempId,
+      wirId: selected.wirId,
+      authorId: String(authorId),
+      authorName: null,
+      notes,
+      fileUrl: null,
+      createdAt: new Date().toISOString(),
+    };
+    setDiscMsgs((prev) => [optimistic, ...prev]);
+
+    try {
+      const saved = await postDiscussion(projectId, selected.wirId, {
+        notes,
+        authorId: String(authorId),
+        file: discFile,
+      });
+
+      // swap optimistic with saved
+      setDiscMsgs((prev) =>
+        prev.map((m) => (m.id === tempId ? saved : m))
+      );
+      setDiscText("");
+      setDiscFile(null);
+    } catch (e: any) {
+      // rollback optimistic
+      setDiscMsgs((prev) => prev.filter((m) => m.id !== tempId));
+      const s = e?.response?.status;
+      const msg = e?.response?.data?.error || e?.message || "Failed to send comment";
+      alert(`Error ${s ?? ""} ${msg}`);
+    }
+  }
+
   function openDispatchModal(wirId: string, onDateISO: string) {
     setDispatchWirId(wirId);
     setDispatchPick(null);
@@ -1275,9 +1674,11 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       photos: [],
       materialApprovalFiles: [],
       safetyClearanceFiles: [],
-      pickedChecklistIds: Array.isArray(x?.items)
-        ? x.items.map((it: any) => it?.name || it?.code || it?.id).filter(Boolean)
-        : [],
+      pickedChecklistIds:
+        (Array.isArray(x?.selectedChecklistIds) && x.selectedChecklistIds.map((z: any) => String(z))) ||
+        (Array.isArray(x?.refChecklistIds) && x.refChecklistIds.map((z: any) => String(z))) ||
+        (Array.isArray(x?.checklistIds) && x.checklistIds.map((z: any) => String(z))) ||
+        [],
       pickedComplianceIds: [],
     };
   };
@@ -1367,8 +1768,15 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
           items: (x.items || []).map((it: any, i: number) => ({
             id: it.id ?? `it-${i}`,
             name: it.name ?? it.title ?? `Item ${i + 1}`,
+            checklistId: it.checklistId ?? it.refChecklistId ?? it.checklist?.id ?? null,
             spec: it.spec ?? it.specification ?? null,
             required: it.required ?? it.requirement ?? null,
+            critical:
+              it.critical ??
+              it.isCritical ??
+              it.flags?.critical ??
+              it.meta?.critical ??
+              null,
             tolerance: it.tolerance ?? null,
             photoCount:
               it.photoCount ?? (Array.isArray(it.photos) ? it.photos.length : null),
@@ -1376,6 +1784,12 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
           })),
           description: x.description ?? x.notes ?? null,
           updatedAt: x.updatedAt ?? x.modifiedAt ?? x.createdAt ?? null,
+          // expose attached checklist IDs so item-count can be computed
+          selectedChecklistIds:
+            (Array.isArray(x?.selectedChecklistIds) && x.selectedChecklistIds.map((z: any) => String(z))) ||
+            (Array.isArray(x?.refChecklistIds) && x.refChecklistIds.map((z: any) => String(z))) ||
+            (Array.isArray(x?.checklistIds) && x.checklistIds.map((z: any) => String(z))) ||
+            [],
 
           // NEW ↓ prefer direct flags/columns if backend sends them
           wasRescheduled:
@@ -1750,14 +2164,8 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       cityTown: newForm.location || null,
       stateName: null,
       description: newForm.details || null,
-      items: (newForm.pickedChecklistIds || []).map((id) => ({
-        name: id,
-        spec: null,
-        required: null,
-        tolerance: null,
-        photoCount: 0,
-        status: "Unknown",
-      })),
+      refChecklistIds: newForm.pickedChecklistIds || [],      // <-- send real checklists
+      materializeItemsFromRef: true                           // <-- optional; default is true};
     };
   };
 
@@ -1807,8 +2215,15 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       items: (x.items || []).map((it: any, i: number) => ({
         id: it.id ?? `it-${i}`,
         name: it.name ?? it.title ?? `Item ${i + 1}`,
+        checklistId: it.checklistId ?? it.refChecklistId ?? it.checklist?.id ?? null,
         spec: it.spec ?? it.specification ?? null,
         required: it.required ?? it.requirement ?? null,
+        critical:
+          it.critical ??
+          it.isCritical ??
+          it.flags?.critical ??
+          it.meta?.critical ??
+          null,
         tolerance: it.tolerance ?? null,
         photoCount:
           it.photoCount ?? (Array.isArray(it.photos) ? it.photos.length : null),
@@ -1816,6 +2231,13 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       })),
       description: x.description ?? x.notes ?? null,
       updatedAt: x.updatedAt ?? x.modifiedAt ?? x.createdAt ?? null,
+      // expose attached checklist IDs so item-count can be computed
+      selectedChecklistIds:
+        (Array.isArray(x?.selectedChecklistIds) && x.selectedChecklistIds.map((z: any) => String(z))) ||
+        (Array.isArray(x?.refChecklistIds) && x.refChecklistIds.map((z: any) => String(z))) ||
+        (Array.isArray(x?.checklistIds) && x.checklistIds.map((z: any) => String(z))) ||
+        [],
+
 
       // NEW ↓ prefer direct flags/columns if backend sends them
       wasRescheduled:
@@ -2087,6 +2509,16 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   }, [clLibOpen]);
 
   useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && hodFinalizeOpen) {
+        setHodFinalizeOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hodFinalizeOpen]);
+
+  useEffect(() => {
     if (clLibOpen) {
       loadChecklists();
     }
@@ -2169,9 +2601,40 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
   }, [selected?.wirId, roViewOpen, roTab, docTab]);
 
   useEffect(() => {
-    if (!selected || !roViewOpen || roTab !== 'document' || docTab !== 'overview') return;
+    if (!selected || !roViewOpen || roTab !== "document" || docTab !== "overview") return;
 
-    const ids = extractChecklistIds(selected);
+    // Helpers
+    const toBool = (v: unknown): boolean =>
+      v === true || (typeof v === "string" && /^(true|yes|y|1)$/i.test(v.trim()));
+
+    const isCritical = (r: any): boolean => {
+      const sev = String(r?.severity ?? "").toLowerCase();
+      const stat = String(r?.status ?? "").toLowerCase(); // support NCR from runner/status
+      return r?.critical === true || toBool(r?.critical) || sev === "critical" || stat === "ncr";
+    };
+
+    const isMandatory = (r: any): boolean => {
+      // Reuse your canonical label helper
+      const label = requiredToLabel((r?.required ?? r?.mandatory ?? r?.requirement) as any);
+      return label === "Mandatory";
+    };
+
+    // 1) Prefer items already attached to this WIR (payload truth)
+    const payloadItems = Array.isArray(selected.items) ? selected.items : [];
+
+    if (payloadItems.length > 0) {
+      // Synchronous computation—no network calls
+      const total = payloadItems.length;
+      const mandatory = payloadItems.reduce((n, r) => n + (isMandatory(r) ? 1 : 0), 0);
+      const critical = payloadItems.reduce((n, r) => n + (isCritical(r) ? 1 : 0), 0);
+      setOvStats({ total, mandatory, critical });
+      setOvError(null);
+      setOvLoading(false);
+      return;
+    }
+
+    // 2) Fallback: derive from reference checklists only if payload has no items
+    const ids = Array.from(new Set(extractChecklistIds(selected)));
     if (!ids.length) {
       setOvStats({ total: 0, mandatory: 0, critical: 0 });
       setOvError(null);
@@ -2184,16 +2647,13 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       setOvLoading(true);
       setOvError(null);
       try {
-        let total = 0, mandatory = 0, critical = 0;
-        for (const id of ids) {
-          const rows: RefChecklistItem[] = await listRefChecklistItems(id);
-          for (const r of rows) {
-            total++;
-            const req = String(r.required ?? "").trim().toLowerCase();
-            if (req === "mandatory") mandatory++;
-            if (r.critical === true) critical++;
-          }
-        }
+        const allLists = await Promise.all(ids.map((id) => listRefChecklistItems(id)));
+        const allItems = allLists.flat();
+
+        const total = allItems.length;
+        const mandatory = allItems.reduce((n, r) => n + (isMandatory(r) ? 1 : 0), 0);
+        const critical = allItems.reduce((n, r) => n + (isCritical(r) ? 1 : 0), 0);
+
         if (!cancelled) setOvStats({ total, mandatory, critical });
       } catch (e: any) {
         if (!cancelled) {
@@ -2205,8 +2665,63 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [selected?.wirId, roViewOpen, roTab, docTab]);
+
+  useEffect(() => {
+    if (!selected || !roViewOpen || roTab !== "discussion") return;
+
+    let cancelled = false;
+    (async () => {
+      setDiscLoading(true);
+      setDiscError(null);
+      try {
+        const rows = await fetchDiscussion(projectId, selected.wirId);
+        if (!cancelled) setDiscMsgs(rows);
+      } catch (e: any) {
+        if (!cancelled) {
+          setDiscMsgs([]);
+          setDiscError(e?.response?.data?.error || e?.message || "Failed to load discussion");
+        }
+      } finally {
+        if (!cancelled) setDiscLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, selected?.wirId, roViewOpen, roTab]);
+
+  // Load all users once when Discussion tab is opened, so we can show full names for old messages
+  useEffect(() => {
+    if (!roViewOpen || roTab !== "discussion") return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get("/admin/users");
+        const users: UserLite[] = Array.isArray(data) ? data : (data?.users ?? []);
+        if (cancelled) return;
+
+        const map: Record<string, string> = {};
+        for (const u of users) {
+          map[String(u.userId)] = displayNameLite(u);
+        }
+        setUserNameById(map);
+      } catch {
+        if (!cancelled) {
+          setUserNameById({});
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [roViewOpen, roTab]);
 
   /* ======== Custom Time Picker UI state ======== */
   const [timePickerOpen, setTimePickerOpen] = useState(false);
@@ -2247,7 +2762,7 @@ export default function WIR_Contractor({ hideTopHeader, onBackOverride }: WIRPro
 
   // Lock page scroll whenever any layered modal is open
   const anyModalOpen =
-    roViewOpen || dispatchOpen || clLibOpen || resOpen || filledOpen || histOpen;
+    roViewOpen || dispatchOpen || clLibOpen || resOpen || filledOpen || histOpen || hodFinalizeOpen;
 
   useScrollLock(anyModalOpen);
 
@@ -2335,6 +2850,55 @@ ${styleEls}
       setResSaving(false);
     }
   };
+
+  // Overall Inspector recommendation text for HOD tile
+  const overallInspectorRec = inspectorRecLabel(
+    inspectorRecommendation[OVERALL_REC_KEY] ?? null
+  );
+  // HOD finalize modal labels
+  const hodModalWirTitle = useMemo(() => {
+    if (!selected) return "";
+    const code = selected.code ? `${selected.code} — ` : "";
+    return code + (selected.title || "Inspection Request");
+  }, [selected]);
+
+  const hodModalInspectorName = selected?.inspectorName || "—";
+  const hodModalRecommendation = overallInspectorRec || "Not yet given";
+
+  const openHodFinalizeModal = () => {
+    if (!selected) return;
+    setHodOutcome(null);
+    setHodNotesText("");
+    setHodFinalizeOpen(true);
+  };
+
+  const handleHodOutcomeClick =
+    (v: HodOutcome) => () => {
+      setHodOutcome(v);
+    };
+
+  const handleHodFinalizeConfirm = () => {
+    if (!selected) return;
+    if (!hodOutcome) {
+      alert("Please select an outcome (Accept / Return / Reject).");
+      return;
+    }
+
+    // ⬇️ Keep behaviour non-breaking for now: just log + close.
+    // Wire actual API here later when backend is ready.
+    log("HOD Finalize submitted", {
+      wirId: selected.wirId,
+      wirCode: selected.code,
+      wirTitle: selected.title,
+      inspectorName: hodModalInspectorName,
+      inspectorRecommendation: inspectorRecommendation[OVERALL_REC_KEY] ?? null,
+      outcome: hodOutcome,
+      notes: hodNotesText,
+    });
+
+    setHodFinalizeOpen(false);
+  };
+
   /* ========================= Render ========================= */
   return (
     <section className="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border dark:border-neutral-800 p-4 sm:p-5 md:p-6">
@@ -3287,6 +3851,146 @@ ${styleEls}
         </div>
       )}
 
+      {hodFinalizeOpen && selected && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setHodFinalizeOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-lg bg-white dark:bg-neutral-900 rounded-2xl border dark:border-neutral-800 shadow-2xl p-4 sm:p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold dark:text-white">
+                  Finalize HOD Recommendation
+                </div>
+                <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  Review Inspector recommendation and select final outcome.
+                </div>
+              </div>
+              <button
+                onClick={() => setHodFinalizeOpen(false)}
+                aria-label="Close"
+                className="rounded-full border dark:border-neutral-700 bg-white/90 dark:bg-neutral-900/90 p-1.5 text-xs"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Info rows */}
+            <div className="space-y-2 text-sm">
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  WIR
+                </div>
+                <div className="mt-0.5 font-medium dark:text-white">
+                  {hodModalWirTitle}
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    Inspector
+                  </div>
+                  <div className="mt-0.5 dark:text-white">
+                    {hodModalInspectorName}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    Recommendation
+                  </div>
+                  <div className="mt-0.5 dark:text-white">
+                    {hodModalRecommendation}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Select Outcome */}
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1.5">
+                Select Outcome
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleHodOutcomeClick("ACCEPT")}
+                  className={
+                    "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 " +
+                    (hodOutcome === "ACCEPT"
+                      ? "bg-emerald-600 text-white border-emerald-600"
+                      : "hover:bg-gray-50 dark:hover:bg-neutral-800 dark:text-white")
+                  }
+                >
+                  Accept
+                </button>
+                <button
+                  type="button"
+                  onClick={handleHodOutcomeClick("RETURN")}
+                  className={
+                    "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 " +
+                    (hodOutcome === "RETURN"
+                      ? "bg-amber-600 text-white border-amber-600"
+                      : "hover:bg-gray-50 dark:hover:bg-neutral-800 dark:text-white")
+                  }
+                >
+                  Return
+                </button>
+                <button
+                  type="button"
+                  onClick={handleHodOutcomeClick("REJECT")}
+                  className={
+                    "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 " +
+                    (hodOutcome === "REJECT"
+                      ? "bg-rose-600 text-white border-rose-600"
+                      : "hover:bg-gray-50 dark:hover:bg-neutral-800 dark:text-white")
+                  }
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+
+            {/* Notes input */}
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                Notes
+              </div>
+              <input
+                type="text"
+                value={hodNotesText}
+                onChange={(e) => setHodNotesText(e.target.value)}
+                placeholder="Add notes for your final decision (optional)…"
+                className="w-full text-sm border rounded-lg px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+              />
+            </div>
+
+            {/* Footer actions */}
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t dark:border-neutral-800">
+              <button
+                type="button"
+                onClick={() => setHodFinalizeOpen(false)}
+                className="text-sm px-3 py-2 rounded border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleHodFinalizeConfirm}
+                className="text-sm px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white"
+              >
+                Finalize Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ===== Read-only View Modal for Submitted/Locked WIR ===== */}
       {roViewOpen && selected && (
         <div
@@ -3446,80 +4150,347 @@ ${styleEls}
                       ) : runnerError ? (
                         <div className="text-sm text-rose-700 dark:text-rose-400">{runnerError}</div>
                       ) : runnerItems.length === 0 ? (
-                        <div className="text-sm text-gray-700 dark:text-gray-300">No checklist items found for this WIR.</div>
+                        <div className="text-sm text-gray-700 dark:text-gray-300">
+                          No checklist items found for this WIR.
+                        </div>
                       ) : (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                          {runnerItems.map((it, i) => {
-                            const tolStr =
-                              formatTolerance(
-                                (it.tolerance as any) ?? null,
-                                it.base ?? null,
-                                it.plus ?? null,
-                                it.minus ?? null,
-                                it.unit || null
-                              ) || (it.tolerance ? String(it.tolerance) : "");
+                        <>
+                          {/* All checklist items + Inspector tiles */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {runnerItems.map((it, i) => {
+                              const tolStr =
+                                formatTolerance(
+                                  (it.tolerance as any) ?? null,
+                                  it.base ?? null,
+                                  it.plus ?? null,
+                                  it.minus ?? null,
+                                  it.unit || null
+                                ) || (it.tolerance ? String(it.tolerance) : "");
 
-                            log("Runner render: tol computation", {
-                              id: it.id,
-                              title: it.title,
-                              rawTolerance: it.tolerance,
-                              base: it.base,
-                              plus: it.plus,
-                              minus: it.minus,
-                              unit: it.unit,
-                              tolStr,
-                            });
+                              const activityTitle =
+                                (newForm.activityLabel || selected?.title || "Activity").toString();
+                              const activityCode = (selected?.code || "").toString();
+                              const reqLabel = requiredToLabel(it.required);
 
-                            const activityTitle = (newForm.activityLabel || selected?.title || "Activity").toString();
-                            const activityCode = (selected?.code || "").toString();
-                            const reqLabel = requiredToLabel(it.required);
+                              const inspector = getInspectorState(it.id);
+                              const passOn = inspector.status === "PASS";
+                              const failOn = inspector.status === "FAIL";
+                              const photoCount = inspector.photos.length;
+                              const hod = getHodState(it.id);
 
-                            return (
-                              <div
-                                key={it.id || `runner-${i}`}
-                                className="rounded-xl border dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 shadow-sm"
-                              >
-                                {/* Heading: Title — Tol */}
-                                <div className="text-sm font-semibold dark:text-white break-words">
-                                  {it.title}
-                                  {tolStr ? <span className="opacity-70"> — {tolStr}</span> : null}
-                                </div>
+                              return (
+                                <div
+                                  key={it.id || `runner-${i}`}
+                                  className="rounded-xl border dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 shadow-sm"
+                                >
+                                  {/* Heading: Title — Tol */}
+                                  <div className="text-sm font-semibold dark:text-white break-words">
+                                    {it.title}
+                                    {tolStr ? <span className="opacity-70"> — {tolStr}</span> : null}
+                                  </div>
 
-                                {/* Meta: Activity Title • Activity Code */}
-                                <div className="mt-0.5">
-                                  <DotSep left={activityTitle} right={activityCode || "—"} />
-                                </div>
+                                  {/* Meta: Activity Title • Activity Code */}
+                                  <div className="mt-0.5">
+                                    <DotSep left={activityTitle} right={activityCode || "—"} />
+                                  </div>
 
-                                {/* Pills */}
-                                <div className="mt-2 flex items-center gap-1.5 flex-wrap">
-                                  <SoftPill label={reqLabel} />
-                                  <SoftPill label="Unit" value={it.unit || ""} />
-                                  <SoftPill label="Tol" value={tolStr} tone="info" />
-                                  {it.status ? <SoftPill label="Status" value={String(it.status)} /> : null}
-                                </div>
+                                  {/* Pills */}
+                                  <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                                    <SoftPill label={reqLabel} />
+                                    {it.critical ? <SoftPill label="Critical" tone="danger" /> : null}
+                                    <SoftPill label="Unit" value={it.unit || ""} />
+                                    <SoftPill label="Tol" value={tolStr} tone="info" />
+                                    {it.status ? (
+                                      <SoftPill label="Status" value={String(it.status)} />
+                                    ) : null}
+                                  </div>
 
-                                {/* Tags */}
-                                <div className="mt-2">
-                                  {it.tags && it.tags.length ? (
-                                    <div className="flex items-center gap-1.5 flex-wrap">
-                                      {it.tags.map((t, k) => (
-                                        <span
-                                          key={`${it.id}-tag-${k}`}
-                                          className="text-[11px] px-2 py-0.5 rounded-md border dark:border-neutral-800 bg-gray-50 text-gray-800 dark:bg-neutral-800 dark:text-gray-200"
-                                        >
-                                          #{t}
+                                  {/* Tags */}
+                                  <div className="mt-2">
+                                    {it.tags && it.tags.length ? (
+                                      <div className="flex items-center gap-1.5 flex-wrap">
+                                        {it.tags.map((t, k) => (
+                                          <span
+                                            key={`${it.id}-tag-${k}`}
+                                            className="text-[11px] px-2 py-0.5 rounded-md border dark:border-neutral-800 bg-gray-50 text-gray-800 dark:bg-neutral-800 dark:text-gray-200"
+                                          >
+                                            #{t}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                                        No tags
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* ===== Tile - Inspector (per checklist item) ===== */}
+                                  <div className="mt-3 pt-3 border-t dark:border-neutral-800">
+                                    <div className="flex items-center justify-between gap-2 mb-2">
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+                                        Inspector
+                                      </div>
+                                      {inspector.status && (
+                                        <span className="text-[11px] px-2 py-0.5 rounded-full border border-emerald-500 text-emerald-700 dark:border-emerald-400 dark:text-emerald-300">
+                                          Marked: {inspector.status}
                                         </span>
-                                      ))}
+                                      )}
                                     </div>
-                                  ) : (
-                                    <div className="text-[11px] text-gray-500 dark:text-gray-400">No tags</div>
-                                  )}
+
+                                    {/* Row: Add Photo + PASS / FAIL buttons */}
+                                    <div className="flex flex-wrap items-center gap-2 mb-2">
+                                      {/* Add Photo */}
+                                      <label className="inline-flex items-center text-xs px-2 py-1 rounded border dark:border-neutral-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800">
+                                        <input
+                                          type="file"
+                                          accept="image/*"
+                                          capture="environment"      // 👈 ask mobile to open back camera
+                                          // capture="user"          // (optional) front camera instead
+                                          className="hidden"
+                                          multiple={false}           // camera + multiple often not supported together
+                                          onChange={handleInspectorPhotoChange(it.id)}
+                                        />
+                                        <span className="mr-1">📷</span>
+                                        <span>Take Photo</span>
+                                      </label>
+
+                                      {photoCount > 0 && (
+                                        <span className="text-[11px] px-2 py-0.5 rounded-full border dark:border-neutral-800">
+                                          {photoCount} photo{photoCount === 1 ? "" : "s"} attached
+                                        </span>
+                                      )}
+
+                                      <div className="flex items-center gap-1 ml-auto">
+                                        <button
+                                          type="button"
+                                          onClick={handleInspectorMark(it.id, "PASS")}
+                                          className={
+                                            "text-xs px-2 py-1 rounded border dark:border-neutral-800 transition " +
+                                            (passOn
+                                              ? "bg-emerald-600 text-white border-emerald-600"
+                                              : "hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                          }
+                                        >
+                                          Mark PASS
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={handleInspectorMark(it.id, "FAIL")}
+                                          className={
+                                            "text-xs px-2 py-1 rounded border dark:border-neutral-800 transition " +
+                                            (failOn
+                                              ? "bg-rose-600 text-white border-rose-600"
+                                              : "hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                          }
+                                        >
+                                          Mark FAIL
+                                        </button>
+                                      </div>
+                                    </div>
+                                    {/* Measurement input */}
+                                    <div className="mb-2">
+                                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                                        Measurement
+                                      </div>
+                                      <input
+                                        type="text"
+                                        className="w-full text-xs border rounded-lg px-2 py-1 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+                                        placeholder="Enter measurement (e.g., 19.8 mm/m)…"
+                                        value={inspector.measurement}
+                                        onChange={handleInspectorMeasurementChange(it.id)}
+                                      />
+                                    </div>
+                                    {/* Remark input */}
+                                    <div>
+                                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                                        Inspector Remark
+                                      </div>
+                                      <textarea
+                                        rows={2}
+                                        className="w-full text-xs border rounded-lg px-2 py-1 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+                                        placeholder="Write brief observation / measurement notes…"
+                                        value={inspector.remark}
+                                        onChange={handleInspectorRemarkChange(it.id)}
+                                      />
+                                    </div>
+                                  </div>
+                                  {/* ===== Tile - HOD (per checklist item) ===== */}
+                                  <div className="mt-3 pt-3 border-t dark:border-neutral-800">
+                                    <div className="flex items-center justify-between gap-2 mb-2">
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+                                        HOD
+                                      </div>
+                                      {hod.lastSavedAt && (
+                                        <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                                          Saved at {fmtDateTime(hod.lastSavedAt)}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Inspector remark (read-only) */}
+                                    <div className="mb-2">
+                                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                                        Inspector Remark (read-only)
+                                      </div>
+                                      <div className="text-xs px-2 py-1 rounded-lg border dark:border-neutral-800 bg-gray-50 dark:bg-neutral-800 dark:text-gray-100 min-h-[2.25rem] whitespace-pre-wrap">
+                                        {(inspector.remark || "").trim() || "—"}
+                                      </div>
+                                    </div>
+
+                                    {/* HOD remark input */}
+                                    <div className="mb-2">
+                                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">
+                                        HOD Remark
+                                      </div>
+                                      <textarea
+                                        rows={2}
+                                        className="w-full text-xs border rounded-lg px-2 py-1 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+                                        placeholder="HOD comments / final decision…"
+                                        value={hod.remark}
+                                        onChange={handleHodRemarkChange(it.id)}
+                                      />
+                                    </div>
+
+                                    {/* Save button */}
+                                    <div className="flex items-center justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={handleHodSave(it.id)}
+                                        className="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-700 text-white"
+                                      >
+                                        Save
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {/* ===== Tile - Inspector Recommendation (for all items) ===== */}
+                          <div className="mt-4 pt-4 border-t dark:border-neutral-800">
+                            <div className="flex items-center justify-between gap-2 mb-2">
+                              <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+                                Inspector Recommendation
+                              </div>
+                            </div>
+
+                            {(() => {
+                              const rec = getInspectorRecommendation(OVERALL_REC_KEY);
+
+                              const onClickChoice = (choice: InspectorRecommendationChoice) => () => {
+                                const current = getInspectorRecommendation(OVERALL_REC_KEY);
+                                updateInspectorRecommendation(
+                                  OVERALL_REC_KEY,
+                                  current === choice ? null : choice
+                                );
+                              };
+
+                              const approveOn = rec === "APPROVE";
+                              const approveWithCommentsOn = rec === "APPROVE_WITH_COMMENTS";
+                              const rejectOn = rec === "REJECT";
+
+                              return (
+                                <>
+                                  {/* Pills row */}
+                                  <div className="flex flex-wrap items-center gap-2 mb-2">
+                                    <button
+                                      type="button"
+                                      onClick={onClickChoice("APPROVE")}
+                                      className={
+                                        "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 transition " +
+                                        (approveOn
+                                          ? "bg-emerald-600 text-white border-emerald-600"
+                                          : "bg-white dark:bg-neutral-900 hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                      }
+                                    >
+                                      Approve
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={onClickChoice("APPROVE_WITH_COMMENTS")}
+                                      className={
+                                        "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 transition " +
+                                        (approveWithCommentsOn
+                                          ? "bg-indigo-600 text-white border-indigo-600"
+                                          : "bg-white dark:bg-neutral-900 hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                      }
+                                    >
+                                      Approve with Comments
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={onClickChoice("REJECT")}
+                                      className={
+                                        "text-xs px-3 py-1.5 rounded-full border dark:border-neutral-800 transition " +
+                                        (rejectOn
+                                          ? "bg-rose-600 text-white border-rose-600"
+                                          : "bg-white dark:bg-neutral-900 hover:bg-gray-50 dark:hover:bg-neutral-800")
+                                      }
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+
+                                  <div className="text-[11px] text-gray-600 dark:text-gray-400">
+                                    We will add relevant comment according to the approval status.
+                                  </div>
+                                  {/* Action buttons: Save Progress / Preview / Send to HOD */}
+                                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => alert("Save Progress clicked (stub).")}
+                                      className="text-xs px-3 py-1.5 rounded-md border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800"
+                                    >
+                                      Save Progress
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => alert("Preview clicked (stub).")}
+                                      className="text-xs px-3 py-1.5 rounded-md border dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-800"
+                                    >
+                                      Preview
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => alert("Send to HOD clicked (stub).")}
+                                      className="text-xs px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white"
+                                    >
+                                      Send to HOD
+                                    </button>
+                                  </div>
+                                </>
+                              );
+                            })()}
+                          </div>
+                          {/* Tile - HOD Recommendation (overall) */}
+                          <div className="mt-4 rounded-xl border dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 sm:p-4">
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+                                  HOD Recommendation
+                                </div>
+                                <div className="mt-1 text-sm text-gray-800 dark:text-gray-100">
+                                  <span className="font-medium">Inspector recommendation:&nbsp;</span>
+                                  <span className="text-gray-700 dark:text-gray-200">
+                                    {overallInspectorRec || "Not yet provided"}
+                                  </span>
                                 </div>
                               </div>
-                            );
-                          })}
 
-                        </div>
+                              <button
+                                type="button"
+                                onClick={openHodFinalizeModal}
+                                className="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white"
+                              >
+                                Finalize Now
+                              </button>
+
+                            </div>
+                          </div>
+
+                        </>
                       )}
                     </SectionCard>
                   )}
@@ -3527,41 +4498,120 @@ ${styleEls}
               )}
 
               {/* DISCUSSION TAB */}
-              {roTab === 'discussion' && (
+              {roTab === 'discussion' && selected && (
                 <>
-                  <SectionCard title="Thread">
-                    <div className="space-y-3">
-                      {/* Placeholder messages */}
-                      <div className="text-sm">
-                        <div className="font-medium dark:text-white">Inspector</div>
-                        <div className="text-gray-700 dark:text-gray-300">Please upload ITP for footing F2.</div>
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">Today 10:32 AM</div>
-                      </div>
-                      <div className="text-sm">
-                        <div className="font-medium dark:text-white">Contractor</div>
-                        <div className="text-gray-700 dark:text-gray-300">Shared in Documents & Evidence.</div>
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">Today 11:05 AM</div>
-                      </div>
-                    </div>
-                  </SectionCard>
-
+                  {/* COMMENT SECTION FIRST */}
                   <SectionCard title="Add a comment">
-                    <div className="flex items-start gap-2">
+                    <div className="flex flex-col gap-2">
                       <textarea
                         rows={3}
                         placeholder="Write a message to the project team…"
                         className="w-full text-sm border rounded-lg px-3 py-2 dark:bg-neutral-900 dark:text-white dark:border-neutral-800"
+                        value={discText}
+                        onChange={(e) => setDiscText(e.target.value)}
                       />
-                      <button
-                        className="shrink-0 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-sm"
-                      // onClick={postComment} // wire later
-                      >
-                        Send
-                      </button>
+
+                      {/* Attach: file OR camera photo */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* File picker */}
+                        <label className="text-xs px-2 py-1 rounded border dark:border-neutral-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800">
+                          <input
+                            type="file"
+                            className="hidden"
+                            onChange={(e) => setDiscFile(e.target.files?.[0] ?? null)}
+                          />
+                          📎 Attach file
+                        </label>
+
+                        {/* Camera capture (mobile-friendly) */}
+                        <label className="text-xs px-2 py-1 rounded border dark:border-neutral-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800">
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden"
+                            onChange={(e) => setDiscFile(e.target.files?.[0] ?? null)}
+                          />
+                          📷 Take photo
+                        </label>
+
+                        {/* Show picked file name */}
+                        {discFile && (
+                          <span className="text-[11px] px-2 py-0.5 rounded-full border dark:border-neutral-800">
+                            {discFile.name}
+                          </span>
+                        )}
+
+                        <div className="grow" />
+
+                        <button
+                          onClick={onDiscussionSend}
+                          className="shrink-0 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-sm"
+                        >
+                          Send
+                        </button>
+                      </div>
+                    </div>
+                  </SectionCard>
+
+                  {/* THREAD BELOW COMMENT BOX */}
+                  <SectionCard title="Thread">
+                    {discLoading && (
+                      <div className="text-sm text-gray-700 dark:text-gray-300">Loading…</div>
+                    )}
+                    {discError && !discLoading && (
+                      <div className="text-sm text-rose-700 dark:text-rose-400">
+                        {discError}
+                      </div>
+                    )}
+                    {!discLoading && !discError && discMsgs.length === 0 && (
+                      <div className="text-sm text-gray-700 dark:text-gray-300">
+                        No messages yet.
+                      </div>
+                    )}
+
+                    <div className="mt-2 space-y-3">
+                      {discMsgs.map((m) => {
+                        const who =
+                          (m.authorName && m.authorName.trim()) ||
+                          userNameById[m.authorId] ||
+                          `User #${m.authorId}`;
+                        return (
+                          <div
+                            key={m.id}
+                            className="text-sm rounded-lg border dark:border-neutral-800 p-3 bg-white dark:bg-neutral-900"
+                          >
+                            <div className="font-medium dark:text-white break-words">
+                              {who}
+                            </div>
+                            {m.notes && (
+                              <div className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words mt-0.5">
+                                {m.notes}
+                              </div>
+                            )}
+                            {m.fileUrl && (
+                              <div className="mt-2">
+                                <a
+                                  href={m.fileUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-xs underline text-emerald-700 dark:text-emerald-300"
+                                >
+                                  {m.fileName || "View attachment"}
+                                </a>
+                              </div>
+                            )}
+                            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
+                              {fmtDateTime(m.createdAt)}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </SectionCard>
                 </>
               )}
+
             </div>
 
             {/* Footer (sticky) */}
